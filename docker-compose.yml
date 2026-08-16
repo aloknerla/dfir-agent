@@ -1,0 +1,148 @@
+# Containerized DFIR Agent console.
+#
+# Sleuth Kit, libewf, tshark, bulk_extractor, and RegRipper have
+# platform-specific installation paths. The image pins a consistent tool
+# environment so findings remain reproducible across workstations.
+#
+# User workflow:
+#   .\install.ps1
+#   dfir-agent
+#
+# Direct Docker commands remain available for development:
+#   docker compose build console
+#   docker compose run --rm console doctor
+#   docker compose run --rm console
+#
+# On Windows, paths use the EVIDENCE=D:/Cases form.
+
+# Fixed rather than derived from the directory Compose happens to be invoked
+# from: a path-derived name gives every clone, rename or move of this checkout
+# its own project, and with it another copy of a ~2 GB image and another set of
+# volumes. One name means one image, wherever the repository is checked out.
+name: dfir-agent
+
+services:
+  console:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: console
+    # Linux launchers provide the invoking user's UID/GID so writable bind
+    # mounts remain owned by that user. Docker Desktop retains the image user.
+    user: "${DFA_UID:-10001}:${DFA_GID:-10001}"
+    # Evidence is mounted read-only, enforcing immutability below the Python
+    # application and every invoked forensic analyzer.
+    volumes:
+      - type: bind
+        source: ${EVIDENCE:-./evidence}
+        target: /evidence
+        read_only: true
+        bind:
+          create_host_path: false
+      # Sessions and audit records survive container removal.
+      - type: bind
+        source: ${RUNS:-./runs}
+        target: /runtime
+        bind:
+          create_host_path: false
+      # Provider settings and credentials remain outside the image and evidence.
+      - type: bind
+        source: ${CONFIG:-./config}
+        target: /config
+        bind:
+          create_host_path: false
+      # Scratch space for carving and controlled temporary copies.
+      - type: bind
+        source: ${WORK:-./work}
+        target: /work
+        bind:
+          create_host_path: false
+      # Everything a tool reconstructs out of the evidence — carved files,
+      # archive members unpacked by a scanner, dumped memory regions — is
+      # written here and nowhere else. A named volume lives inside the Docker
+      # VM's virtual disk rather than on the host filesystem, so the payloads
+      # are not executables the host owns and an on-access scanner on the host
+      # cannot delete one out from under the tool that is still writing it.
+      # A bind mount would do neither: isolating writes is exactly what a bind
+      # mount exists not to do.
+      - type: volume
+        source: payload-scratch
+        target: /payload
+      # Volatility identifies a memory image by scanning the whole symbol store
+      # for a matching kernel GUID, so the store's read latency is paid again by
+      # every memory plugin. Measured against the 3015-file pack: stating it
+      # costs 2631 ms across this host bind mount and 28 ms from container-local
+      # storage. The host directory below /work stays the source of truth and
+      # the entrypoint seeds this volume from it once; every run after that
+      # reads only the fast copy, and no pack is ever re-downloaded.
+      - type: volume
+        source: volatility-symbols
+        target: /symbols
+    environment:
+      DFA_ENV_FILE: /config/.env
+      DFA_CONTAINERIZED: "1"
+      DFA_HOST_PLATFORM: "${DFA_HOST_PLATFORM:-unknown}"
+      DFA_EVIDENCE_ROOT: /evidence
+      DFA_RUNS_DIR: /runtime
+      DFA_PAYLOAD_ROOT: /payload
+      # Volatility runs offline: it never reaches out for a kernel symbol table,
+      # so the local pack is where it must find one. Without one every plugin
+      # returns nothing and reports the read as incomplete, which reads as an
+      # empty memory image rather than as a missing symbol table. The entrypoint
+      # names the directory, because only it knows whether the fast local copy
+      # exists yet; setting the variable here overrides that choice.
+      DFA_VOL_SYMBOL_DIRS: "${DFA_VOL_SYMBOL_DIRS:-}"
+      DFA_HOST_CASE_REQUEST_FILE: "${DFA_HOST_CASE_REQUEST_FILE:-}"
+      DFA_HOST_CASE_REQUEST_TOKEN: "${DFA_HOST_CASE_REQUEST_TOKEN:-}"
+      # Operator-facing case name, forwarded from the host directory because a
+      # directory mounts at the fixed point /evidence and its real name is lost
+      # at the container boundary. Display only; never the case identity, so it
+      # never reaches the model.
+      DFA_CASE_LABEL: "${DFA_CASE_LABEL:-}"
+      # Which image this container came out of. Nothing inside an image can name
+      # the image it is in, so the launcher asks Docker and states the answer
+      # here; without it the console can only date its own files and an operator
+      # running a week-old image has nothing on screen that says so. Empty when
+      # the run was started by hand rather than by a launcher, which the console
+      # treats as "unknown" rather than as an error.
+      DFA_BUILD_ID: "${DFA_BUILD_ID:-}"
+      DFA_BUILD_TIME: "${DFA_BUILD_TIME:-}"
+      # The host directories the two bind mounts below come from. A container
+      # cannot see a mount's source, so a console that printed /runtime/exports
+      # back would be naming a directory that does not exist on the operator's
+      # machine. Display only: every path the console uses stays the container
+      # path. Empty means the console says "inside the container" instead of
+      # inventing a host path.
+      DFA_HOST_RUNS: "${DFA_HOST_RUNS:-}"
+      DFA_HOST_EVIDENCE: "${DFA_HOST_EVIDENCE:-}"
+      DFA_SUPPRESS_BANNER: "${DFA_SUPPRESS_BANNER:-0}"
+      # The Textual console needs truecolor to draw its theme; without these
+      # the container terminal reports plain xterm and everything renders in
+      # 16 colors. The host's values win when it has any.
+      TERM: "${TERM:-xterm-256color}"
+      COLORTERM: "${COLORTERM:-truecolor}"
+      HOME: /work/home
+      XDG_CACHE_HOME: /work/cache
+    # Docker Desktop provides this name automatically. The explicit gateway
+    # mapping gives Linux Docker Engine the same route to a host Ollama service.
+    extra_hosts:
+      - "host.docker.internal=host-gateway"
+    # The console requires no additional Linux capabilities.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: false
+    stdin_open: true
+    tty: true
+
+volumes:
+  # Deliberately unnamed at the top level so Compose scopes it to the project:
+  # one investigation's reconstructed payloads are not another's, and
+  # `docker compose down -v` is the whole cleanup.
+  payload-scratch:
+  # The symbol pack Volatility reads, held inside the Docker VM's virtual disk
+  # instead of on the host filesystem, where every read crosses the bind-mount
+  # translation layer. Seeded from the host copy, so `docker compose down -v`
+  # costs a re-seed and never a re-download.
+  volatility-symbols:

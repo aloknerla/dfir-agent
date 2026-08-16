@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using this metadata."
+title: "DFIR Agent: an LLM-assisted forensic investigation console"
+type: software
+authors:
+  - given-names: Adrian
+    family-names: "Lokner Lađević"
+version: 0.1.0
+repository-code: "https://github.com/aloknerla/dfir-agent"
+license: MIT
+keywords:
+  - digital forensics
+  - large language models
+  - DFIR
+  - cybersecurity
+abstract: >-
+  A research prototype that combines model-driven forensic investigation with
+  deterministic analyzers, execution oversight, standardized findings, and a
+  hash-chained record of every tool call in `audit.jsonl`.

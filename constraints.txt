@@ -1,0 +1,51 @@
+# Frozen environment for reproducible measurements.
+#
+# Only pure Python runtime and research dependencies that can affect agent
+# behavior or measured results are pinned here. Native forensic libraries such
+# as pytsk3, libewf, Plaso, and Volatility are supplied by the container or the
+# host forensic workstation because pinning them here would conflict with
+# platform specific wheels and operating system packages.
+#
+# Install the same dependency set on each supported workstation:
+#   pip install -c constraints.txt -e ".[dev]"
+#
+# These versions are validated by the full test suite. Publication model calls
+# use OpenRouter; the local model backend is not part of the measured path. The
+# exact runtime package and tool inventory is additionally frozen in the study
+# lock before a confirmatory run.
+
+openai==2.41.0
+langgraph==1.2.4
+langgraph-checkpoint==4.1.1
+langgraph-prebuilt==1.1.0
+langgraph-sdk==0.4.2
+langchain==1.3.7
+langchain-core==1.4.0
+langchain-openai==1.2.2
+# langsmith is a transitive dependency of langchain-core, and it is the package
+# that actually performs run upload, so leaving it unpinned left the one
+# component with an egress path outside the frozen set.  Pinned at the version
+# the current suite runs against.
+#
+# Recorded drift, not yet reconciled: this host has langchain-core 1.5.3,
+# langchain 1.3.14 and langgraph 1.2.10 installed against the 1.4.0 / 1.3.7 /
+# 1.2.4 pinned above, so `pip install -c constraints.txt` does NOT reproduce the
+# environment these measurements ran in.  The pins are a declaration; nothing
+# enforces them.  This matters to egress specifically: the gateway rewrite path
+# (`langchain_core/utils/_gateway.py`) exists only in 1.5.x, so the pinned
+# versions describe a smaller attack surface than the installed ones.  The seal
+# in `core/telemetry_egress.py` removes the variables either way and so does not
+# depend on which of the two is present.
+langsmith==0.8.9
+pydantic==2.13.4
+pydantic-settings==2.6.0
+python-dotenv==1.2.2
+rich==14.3.3
+textual==8.2.7
+prompt-toolkit==3.0.52
+mcp==1.28.1
+tqdm==4.67.3
+
+# The decoder every transform_query operation runs through. Pure Python, so it
+# is pinned here rather than left to the container like the native libraries.
+chepy==7.6.0

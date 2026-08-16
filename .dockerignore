@@ -1,0 +1,30 @@
+# Fail closed: the console image needs only first-party source, the packaging
+# metadata, and the deployment files its build stages copy. Never send Git
+# history, environment files, evidence, caches, or local work products to the
+# Docker builder.
+**
+!.dockerignore
+!pyproject.toml
+!constraints.txt
+!README.md
+!LICENSE
+!NOTICE
+!src/
+!src/**
+src/**/__pycache__/
+src/**/.pytest_cache/
+src/**/.mypy_cache/
+src/**/.ruff_cache/
+src/**/*.py[cod]
+!deploy/
+!deploy/Dockerfile
+!deploy/forensic-top-level-constraints.txt
+!deploy/bulk-extractor-wrapper.sh
+!deploy/clamav-wrapper.sh
+# Tests are linted and run in CI, not needed inside the build context.
+tests/
+# Environment files must never enter the build context.
+.env
+.env.*
+**/*.env
+**/*.env.*

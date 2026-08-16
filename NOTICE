@@ -1,0 +1,40 @@
+dfir-agent
+Copyright (c) 2026 Adrian Lokner Lađević
+
+This product is licensed under the MIT License (see the LICENSE file).
+
+================================================================================
+Third-party components
+================================================================================
+
+1. External forensic tools (NOT distributed with this repository)
+   This project contributes orchestration, oversight, and the record of what
+   ran; the forensic reading itself is done by established community tools.
+   Those tools are the substance of every answer this system produces, and the
+   authors and maintainers below are owed the credit for them.
+
+   The tool layer wraps them through their own public interfaces, predominantly
+   in read-only mode. They are invoked at runtime only if installed on the host
+   and are not bundled here; each is governed by its own license:
+
+       The Sleuth Kit (pytsk3)      Brian Carrier and contributors  IBM/CPL, GPL-2.0
+       libewf (libewf-python)       Joachim Metz and contributors    LGPL-3.0-or-later
+       RegRipper                    Harlan Carvey and contributors   MIT
+       Volatility 3                 The Volatility Foundation        Volatility Software License
+       Plaso / log2timeline         Log2Timeline maintainers         Apache-2.0
+       dfVFS                        Joachim Metz and contributors    Apache-2.0
+       regipy                       Martin G. Korman                 MIT
+       libregf (libregf-python)     Joachim Metz and contributors    LGPL-3.0-or-later
+       file / libmagic              Christos Zoulas and contributors  BSD-2-Clause
+       Wireshark (tshark)           The Wireshark team               GPL-2.0-or-later
+       bulk_extractor               Simson Garfinkel and contributors  MIT / public domain
+       foremost                     Jesse Kornblum, Kris Kendall, Nick Mikus  public domain
+       photorec (TestDisk)          Christophe Grenier               GPL-2.0-or-later
+       pyevtx / python-evtx         Joachim Metz; Willi Ballenthin   Apache-2.0
+       py7zr                        Hiroshi Miura                    LGPL-2.1-or-later
+       Tesseract OCR                Tesseract contributors, Google   Apache-2.0
+       ClamAV                       Cisco Systems / Talos            GPL-2.0
+
+   The license identifiers above are recorded as each project publishes them and
+   are informational; the authoritative text ships with each tool. Nothing in
+   this list is redistributed by this repository.

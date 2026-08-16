@@ -1,0 +1,126 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dfir-agent"
+version = "0.1.0"
+description = "Autonomous DFIR investigation assistant with deterministic oversight and recorded, standardized findings"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = "MIT"
+authors = [{ name = "Adrian Lokner Lađević" }]
+keywords = ["digital-forensics", "llm-agent", "dfir", "security", "reproducibility"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+dependencies = [
+    "openai>=1.40,<3",
+    # The graph is built through langchain.agents.create_agent; langgraph
+    # remains the runtime underneath it. Both are bounded so an unconstrained
+    # install cannot resolve a major version whose factory contract differs.
+    "langgraph>=1.2,<2",
+    "langchain>=1.3,<2",
+    "langchain-openai>=1.2,<2",
+    "langchain-core>=1.4,<2",
+    "pydantic>=2,<3",
+    "python-dotenv",
+    "rich",
+    "prompt-toolkit>=3.0,<4",
+    # The full-screen console IS the default entry point (bare `dfir-agent`),
+    # so textual is a runtime requirement, not an optional extra.
+    "textual>=8,<9",
+    "pytsk3",
+    "libewf-python",
+    "regipy",
+]
+
+[project.urls]
+Homepage = "https://github.com/aloknerla/dfir-agent"
+Repository = "https://github.com/aloknerla/dfir-agent"
+Issues = "https://github.com/aloknerla/dfir-agent/issues"
+
+[project.optional-dependencies]
+# Optional forensic libraries grouped across disk, registry, memory,
+# network, archive, and EVTX analysis.
+forensics = [
+    "dfvfs",
+    "volatility3",
+    "py7zr",
+    "python-evtx>=0.8.1",
+    # The decoder behind transform_query. Bounded below at the release whose
+    # operation names this binding calls, and below the next major so an
+    # unconstrained install cannot resolve a renamed API.
+    "chepy>=7.6,<8",
+]
+# Retained so `pip install .[tui]` and deploy/Dockerfile's extras lookup keep
+# resolving. textual is a base dependency now, so this extra adds nothing.
+tui = [
+    "textual>=8,<9",
+]
+# Development, testing, and code-quality checks.
+dev = [
+    "pytest>=8,<10",
+    "pytest-timeout>=2,<3",
+    "pytest-xdist>=3,<4",
+    "python-evtx>=0.8.1",
+    # The decoder behind transform_query and the timestamp library behind the
+    # two conversions beside it. Both are light enough to install for a test
+    # run, and skipping their tests instead would leave the decoding this
+    # project claims as its own entirely unverified outside the image.
+    "chepy>=7.6,<8",
+    "dfdatetime",
+    "ruff>=0.12,<1",
+    "mypy>=1.11,<3",
+    "build>=1.2,<2",
+    "setuptools>=77",
+    "wheel>=0.43,<1",
+]
+
+[project.scripts]
+dfir-agent = "forensic_agent.cli:main"
+dfir-trace-svg = "forensic_agent.reporting.trace_svg:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+
+[tool.setuptools.package-data]
+forensic_agent = [
+    # Terminal-side data catalogs (i18n renderings, question-screen vocabulary).
+    "cli/*.json",
+    # The TUI's own documentation ships beside its package.
+    "tui/*.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# Keep the bug-catching rules (F pyflakes, I import order, UP modernize, B bugbear);
+# waive purely-stylistic/structural pycodestyle rules this codebase uses deliberately:
+# E501 long lines, E402 conditional/late imports, E702 compact statements, E741 short names,
+# B028 warnings without an explicit stacklevel, UP031 %-format (the CLI help is a named
+# %(a)s template).
+ignore = ["E501", "E402", "E702", "E741", "B028", "UP031"]
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+ignore_missing_imports = true
+warn_unused_ignores = false
+show_error_codes = true
+pretty = true

@@ -1,0 +1,11 @@
+# Explicit opt-in override for hosts with SELinux in enforcing mode.
+#
+# The DFIR Agent launcher selects this file only when the operator sets
+# DFA_ALLOW_SELINUX_LABEL_DISABLE=1. Disabling the container label avoids the
+# evidence relabeling performed by :z or :Z bind options. Other container
+# restrictions from docker-compose.yml remain active.
+
+services:
+  console:
+    security_opt:
+      - label=disable

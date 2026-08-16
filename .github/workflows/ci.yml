@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lint tooling
+        run: python -m pip install -c constraints.txt ruff mypy
+
+      - name: Lint (ruff)
+        run: ruff check src tests
+
+      - name: Static types (mypy)
+        run: mypy src
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install native forensic libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libewf-dev \
+            libtsk-dev
+
+      - name: Install package and test tooling
+        run: python -m pip install -c constraints.txt -e ".[dev]"
+
+      - name: Unit tests (pytest)
+        run: PYTHONPATH=src pytest -q
+
+      # The console suite guards itself with `pytest.importorskip("textual")`, so a
+      # missing dependency turns it green by skipping it instead of failing. Import
+      # textual explicitly and reject a run that skipped rather than executed.
+      - name: Console tests must actually run
+        shell: bash
+        run: |
+          python -c "import textual"
+          PYTHONPATH=src pytest tests/test_tui_console.py -q -rs | tee console-suite.log
+          if tail -3 console-suite.log | grep -qE '[0-9]+ skipped|no tests ran'; then
+            echo "::error::the console suite skipped instead of running"
+            exit 1
+          fi
+
+  docker-console:
+    name: Build console image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the console target
+        run: docker build --target console --tag dfir-agent-console:ci --file deploy/Dockerfile .

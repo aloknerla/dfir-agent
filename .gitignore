@@ -1,0 +1,159 @@
+# Secrets and local provider configuration
+.env
+/config/
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+**/*api_key*
+**/*apikey*
+
+# Launcher install artifact: install.ps1/.sh writes the absolute host path of
+# the project root next to the launcher so it can find docker-compose.yml. It is
+# machine-specific and must never be committed.
+/deploy/console/project-root.txt
+
+# Forensic evidence and large binary artifacts
+*.E01
+*.E0[0-9]
+*.Ex[0-9]
+*.L01
+*.raw
+*.img
+*.dd
+*.001
+*.vmdk
+*.vhd
+*.vhdx
+*.aff4
+
+# Memory captures
+*.dmp
+*.mem
+*.lime
+*.vmem
+*.core
+
+# Network captures
+*.pcap
+*.pcapng
+*.cap
+
+# Timelines and forensic intermediates
+*.plaso
+*.body
+
+# External-tool logs
+*.log
+*.log.gz
+psort-*.log*
+
+# Local case data and runtime output
+/images/
+/evidence/
+/cases/
+/tasks/
+/case_*/
+/runs/
+/work/
+/diagnostics/
+
+# Regenerable evaluation output
+results/
+*_results.json
+*_results.jsonl
+eval_run*.log
+
+# Graphify knowledge-graph output (regenerable from the code via `graphify update`)
+/graphify-out/
+pilot_results_backup/
+
+# Agent runtime artifacts
+/skills/
+*.oversight.md
+audit.jsonl
+.cache/
+oversight*.jsonl
+*_findings.jsonl
+*_audit.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.pytest-*/
+.mypy_cache/
+.mypy-*/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+coverage.json
+htmlcov/
+.tox/
+.nox/
+
+# Operating systems, editors, and temporary files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.tmp
+*.bak
+~$*
+~WRL*.tmp
+
+# Merge, rebase, and patch leftovers. This project integrates many parallel
+# branches, and a committed `*.orig` is the most common way that scratch reaches
+# a reader.
+*.orig
+*.rej
+*.patch.tmp
+
+# Local agent and assistant configuration (machine-specific, not project state)
+.claude/
+.aider*
+
+# Repository-local caches and scratch directories
+/$cache/
+/tmp/
+*backup*.jsonl
+
+# Session scratch at the repository root. Four such scripts were committed by
+# accident and carried one author's worktree layout, five private branch
+# worktree names, the evidence store path and a local image digest into the
+# handover. The rule is anchored to the root on purpose: `_*` unanchored would
+# swallow every package `__init__.py`.
+/_*
+
+# Development handover notes. A tracked NEXT_SESSION.md published a private
+# branch name, a worktree path, an open-bug backlog and the owner's TODOs.
+# Session state belongs in the issue tracker, never in the published tree.
+/NEXT_SESSION.md
+/HANDOFF.md
+/HANDOVER.md
+/SESSION_*.md
+/NOTES.md
+/TODO.md
+
+# Rendered figures and console captures. They are produced from the console for
+# external write-ups, not shipped with the tool, and they would otherwise carry
+# case-specific values into the repository.
+docs/tui/
+docs/figures/
+
+# Evaluation and CTF measurement harness, not part of the shipped tool.
+/tools/examiner_ask.sh
+/deploy/console/ctf.sh
