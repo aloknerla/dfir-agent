@@ -15,6 +15,7 @@ bajtovno isti na oba jezika dok se oznake prevode.
 
 from __future__ import annotations
 
+import io
 import json
 import types
 from pathlib import Path
@@ -438,3 +439,96 @@ def test_the_help_text_describes_the_new_form() -> None:
     assert "/oversight prompt" in detail
 
     assert "/oversight [n|calls|prompt]" in render_help()
+
+
+# ---------------------------------------------------------------------------
+# the command sheet: /help's own listing, at the width it is given
+# ---------------------------------------------------------------------------
+def _sheet_lines(width: int, **kwargs) -> list[str]:
+    """The rows the command sheet actually produces at ``width`` columns.
+
+    The width is pinned rather than taken from the environment: the ambient
+    terminal is not the same here as it is in CI, and this sheet chooses its
+    layout by the width it is handed.
+    """
+
+    from forensic_agent.cli.terminal import build_help_renderable
+
+    console = Console(width=width, record=True, file=io.StringIO())
+    console.print(build_help_renderable(None, **kwargs))
+    return [line.rstrip() for line in console.export_text().rstrip("\n").split("\n")]
+
+
+def test_the_command_sheet_states_its_headings_once() -> None:
+    """A heading repeated every eight rows reads as content, not as a label.
+
+    Each category is its own table so the groups stay findable, and every one
+    of them used to carry its own "Command" / "What it does" head — five
+    headings down one screen for one sheet of three columns.
+    """
+
+    for width in (200, 140, 116, 100, 60):
+        lines = _sheet_lines(width)
+        headings = [line for line in lines if line.startswith("Command")]
+        assert len(headings) == 1, (
+            f"at {width} columns the sheet carried {len(headings)} column "
+            f"headings: {headings}"
+        )
+        # The groups themselves are still each named, so the sheet has not
+        # simply been flattened into one undifferentiated list.
+        titles = [line for line in lines if line.startswith("\u203a ")]
+        assert len(titles) >= 5, f"at {width} the groups lost their titles: {titles}"
+
+
+def test_the_command_sheet_fills_the_width_it_is_given() -> None:
+    """Wide is read across. A fixed column down the middle wastes the window."""
+
+    wide = _sheet_lines(200)
+    assert max(len(line) for line in wide) > 150
+    # And nothing runs past the edge at any width.
+    for width in (200, 140, 116, 100, 72, 48):
+        for line in _sheet_lines(width):
+            assert len(line) <= width, f"{len(line)} cells at width {width}: {line!r}"
+
+
+def test_every_command_keeps_its_description_however_narrow_the_sheet() -> None:
+    """Degrading must not mean dropping a column.
+
+    Three fixed columns whose widths together exceeded the window left the
+    third nothing at all, and Rich then omitted it: a command reference with
+    the descriptions missing. Below the width three columns need, the name and
+    its syntax share one column that flexes instead.
+    """
+
+    for width in (200, 116, 100, 72, 48):
+        body = "\n".join(_sheet_lines(width))
+        for command_spec in COMMAND_REGISTRY.commands:
+            assert f"/{command_spec.name}" in body, (width, command_spec.name)
+        # A description from each end of the sheet, wrapped or not.
+        assert "Show all commands" in body.replace("\n", " "), width
+
+
+def test_the_sheet_is_drawn_in_the_palette_it_is_handed() -> None:
+    """The console has several themes; a sheet with a colour of its own has none.
+
+    The alternating row fill was exactly that — a value from this module's
+    fixed palette, painted behind every second command whatever theme the
+    full-screen console was running.
+    """
+
+    from forensic_agent.cli.terminal import build_help_renderable
+
+    console = Console(
+        width=160, record=True, file=io.StringIO(), force_terminal=True,
+        color_system="truecolor",
+    )
+    console.print(
+        build_help_renderable(
+            None, palette={"ACCENT": "#ff00ff", "DIM": "#00ff00",
+                           "DIM_BRIGHT": "#00ffff", "TEXT": "#ffff00"}
+        )
+    )
+    painted = console.export_text(styles=True)
+    assert "255;0;255" in painted, "the accent the caller handed in was not used"
+    # No background is painted at all: the sheet takes the ground it is on.
+    assert "48;2;" not in painted, "the sheet painted a background of its own"

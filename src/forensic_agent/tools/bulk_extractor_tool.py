@@ -30,7 +30,7 @@ import re
 import stat
 import threading
 import xml.etree.ElementTree as ET
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,7 +50,7 @@ from forensic_agent.core.storage_containment import (
 )
 from forensic_agent.core.tool_failure import tool_failure_result
 from forensic_agent.core.toolio import shape
-from forensic_agent.core.toolkit import run_external
+from forensic_agent.core.toolkit import run_external, stream_external
 
 #: Every scan directory this module creates carries this prefix below the
 #: controlled root, so cleanup can never remove a directory it did not create.
@@ -314,11 +314,73 @@ def _read_find(outdir: Path, *, offset: int, limit: int,
     return shape(rows, offset=offset, limit=limit)
 
 
-def _run(image: str, be: str, outdir: str) -> str:
-    """Scan ``image`` into the already provisioned controlled directory ``outdir``."""
+def _read_reported_percentage(report: Callable[[float], None]) -> Callable[[str], None]:
+    """Turn the scanner's own progress lines into the fractions it measured.
 
-    # run_external raises ExternalToolError on failure, so the caller does NOT cache a failed scan
-    run_external([be, "-o", outdir, image], timeout=1800)
+    bulk_extractor says how far through the medium it has read in lines like
+    ``Offset 67MB (0.16%) Done in 1:29:44``. The pattern that reads them is the
+    entity index's, imported rather than written a second time: two spellings of
+    the same scanner output are two things that can disagree about it.
+
+    Nothing is invented here. A line with no percentage in it reports nothing,
+    so a scanner that never states one leaves the caller exactly as silent as it
+    is today, and the fraction handed on is only ever the one the scanner
+    printed.
+
+    Only a value that moves forward is passed on. A scan of a large medium
+    prints one of these lines per megabyte and repeats the same percentage
+    across many of them, and a report per line would repaint a console
+    thousands of times to show a number that had not changed. Forward-only also
+    means the figure on screen is the furthest the scanner has said it got,
+    which is the one thing an operator can act on.
+    """
+
+    from forensic_agent.tools.entity_index import _PERCENT
+
+    reported = -1.0
+
+    def read(line: str) -> None:
+        nonlocal reported
+        found = _PERCENT.search(line)
+        if found is None:
+            return
+        try:
+            fraction = float(found.group(1)) / 100.0
+        except ValueError:  # pragma: no cover - the pattern only matches decimals
+            return
+        fraction = min(1.0, max(0.0, fraction))
+        if fraction <= reported:
+            return
+        reported = fraction
+        report(fraction)
+
+    return read
+
+
+def _run(
+    image: str,
+    be: str,
+    outdir: str,
+    *,
+    on_percent: Callable[[float], None] | None = None,
+) -> str:
+    """Scan ``image`` into the already provisioned controlled directory ``outdir``.
+
+    With ``on_percent`` the scan is run through the streaming runner and the
+    percentages bulk_extractor prints are handed over as it prints them; the
+    whole-image scan behind a case open takes tens of minutes on a real medium,
+    and captured output arrives only once that wait is already over. Without it
+    the scan takes the blocking path every other wrapper in this module uses,
+    so a caller that has nobody to tell pays nothing for the option.
+    """
+
+    # Both runners raise ExternalToolError on failure, so the caller does NOT
+    # cache a failed scan.
+    argv = [be, "-o", outdir, image]
+    if on_percent is None:
+        run_external(argv, timeout=1800)
+    else:
+        stream_external(argv, timeout=1800, on_line=_read_reported_percentage(on_percent))
     return outdir
 
 
@@ -1228,11 +1290,25 @@ def prewarm_default_scan(
     import json as _json
     import shutil as _shutil
 
-    if progress is not None:
+    phase = "scanning the whole image with bulk_extractor"
+
+    def announce(fraction: float | None) -> None:
+        """Say how far the scan has read, under the phase it is in.
+
+        ``fraction`` is ``None`` until the scanner has stated one and the value
+        it stated afterwards. The caller draws a bar for a number and a spinner
+        for nothing, so the honest thing before the first progress line — and
+        for a scanner build that prints none at all — is to keep saying nothing.
+        """
+
+        if progress is None:
+            return
         try:
-            progress(None, "scanning the whole image with bulk_extractor")
+            progress(fraction, phase)
         except Exception:
             pass
+
+    announce(None)
     key = _scan_cache_key(identity)
     with _scan_lock(("prewarm", str(root), key)):
         published = _published_scan(evidence_sha256, be)
@@ -1241,7 +1317,10 @@ def prewarm_default_scan(
         staging = root / f".scan-{key}.prewarm-{os.getpid()}"
         try:
             staging.mkdir(parents=True, exist_ok=False)
-            _run(image_path, be, str(staging))
+            if progress is None:
+                _run(image_path, be, str(staging))
+            else:
+                _run(image_path, be, str(staging), on_percent=announce)
             # The manifest is written LAST, so a directory carrying one is
             # complete by construction; the rename decides publication.
             (staging / _SCAN_CACHE_MANIFEST).write_text(

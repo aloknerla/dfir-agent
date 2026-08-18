@@ -51,6 +51,48 @@ evidence_selection_source_path=
 DFA_CASE_LABEL=
 export DFA_CASE_LABEL
 
+# --rebuild belongs to the launcher and not to the console, so the token is
+# taken out of the argument list here and can never reach the containerized
+# CLI. The build runs through the same --project-directory and --file as the
+# run at the bottom of this script, which is the only reason the image it
+# produces is the image the launcher then starts. Typing "docker compose build
+# console" somewhere other than the project directory names another project and
+# builds an image nothing here ever runs, which costs a rebuild and leaves the
+# operator looking at the old console.
+rebuild_requested=0
+if ((${#agent_arguments[@]} > 0)); then
+    kept_arguments=()
+    for argument in "${agent_arguments[@]}"; do
+        if [[ "${argument,,}" == "--rebuild" ]]; then
+            rebuild_requested=1
+            continue
+        fi
+        kept_arguments+=("$argument")
+    done
+    # Expanded under `set -u`, an empty array is an unbound variable on bash
+    # before 4.4; every argument being --rebuild is exactly that case, and it
+    # is the ordinary one.
+    agent_arguments=(${kept_arguments[@]+"${kept_arguments[@]}"})
+    unset kept_arguments
+fi
+
+if ((rebuild_requested == 1)); then
+    ((${#agent_arguments[@]} == 0)) ||
+        fail "--rebuild rebuilds the console image and does nothing else; run it on its own, then start the console."
+    printf 'Rebuilding the dfir-agent console image from %s.\n' "$project_root"
+    # A build that fails has already printed why, so its status is passed on
+    # rather than replaced with a message of this script's own.
+    build_status=0
+    docker compose \
+        --project-directory "$project_root" \
+        --file "$compose_file" \
+        "${DFA_DOCKER_OVERRIDE_ARGS[@]}" \
+        build console || build_status=$?
+    ((build_status == 0)) || exit "$build_status"
+    printf 'Rebuilt. Start the console with: dfir-agent\n'
+    exit 0
+fi
+
 validate_path_text() {
     local value=$1
     local label=$2
@@ -584,7 +626,10 @@ collect_staleness_warnings() {
         "The image $console_image_name was built before the project directory's newest commit."
         "  image built:   $image_when"
         "  newest commit: $commit_when"
-        "  rebuild: docker compose --project-directory $project_root --file $compose_file build console"
+        # The launcher's own command rather than a Compose line: it already
+        # knows the compose file and the project this image belongs to, so
+        # there is nothing left for the operator to get wrong.
+        "  rebuild: dfir-agent --rebuild"
     )
 }
 

@@ -319,7 +319,7 @@ stable references.
 | **Evidence sources** | Disk images, memory captures, network captures, and approved derived artifacts opened without modifying the source. |
 | **Standardized findings** | Normalize tool status, provenance, coverage, warnings, pagination, and content integrity metadata. |
 | **Verification and reporting** | Relate answer claims to collected findings and present the result to the investigator. |
-| **Audit trail** | Records questions, proposed calls, oversight decisions, findings, and the final outcome in `audit.jsonl` in chronological order, hash-chained so later modification is detectable. |
+| **Run record** | Records questions, proposed calls, oversight decisions, findings, and the final outcome in `audit.jsonl` in chronological order, hash-chained so later modification is detectable. |
 
 ## Investigation lifecycle
 
@@ -341,8 +341,8 @@ stable references.
    bounded result, or gather evidence required by a known safety condition.
 8. Finalization checks provenance and coverage, constructs a bounded verification
    view, performs the configured answer verification, and records the final report.
-9. Temporary resources are closed and the audit and finding traces remain
-   available for review.
+9. Temporary resources are closed and the run record and the finding traces
+   remain available for review.
 
 The model therefore has functional access to the approved case, not unrestricted
 access to the host file system. It has no general shell and cannot select arbitrary
@@ -517,7 +517,7 @@ function can run. The active policy checks:
 - whether the session has the required capability;
 - whether host paths remain within approved roots;
 - whether model request, function call, output size, and time limits remain;
-- whether the call and its outcome are recorded in the audit trail.
+- whether the call and its outcome are recorded in the run record.
 
 No general `shell` function, arbitrary process launcher, or unrestricted file
 reader is exposed to the model. External programs are invoked only inside approved
@@ -546,7 +546,7 @@ does not make the application an MCP server and does not establish forensic
 validity. Provenance, read only evidence handling, argument validation, and
 independent review remain separate requirements.
 
-## Verification, reporting, and audit
+## Verification, reporting, and the run record
 
 The reliability layer accepts only valid standardized findings when constructing
 the verification view. Deterministic synthesis is used for supported structured
@@ -554,10 +554,10 @@ artifacts, while a bounded model request may verify the answer draft against the
 accepted findings. If the available evidence is incomplete, the result must expose
 that limitation rather than present an unsupported claim as established fact.
 
-The audit trail distinguishes failures in evidence processing, analytical planning,
+The run record distinguishes failures in evidence processing, analytical planning,
 interpretation, verification, and scoring. It records observable events needed to
 reconstruct the investigation, but it does not expose private chain of thought.
-Audit files may contain sensitive paths or evidence derived values and must be
+Record files may contain sensitive paths or evidence derived values and must be
 protected as case material.
 
 ## Model providers

@@ -90,9 +90,10 @@ se prijelaza na obično nazivlje opisanog niže:
   `/model <id>` prebacuje izravno. `/effort` je jedina površina za to
   koliko posla jedna poruka smije potrošiti: odaberite redak i `Enter` na
   mjestu uređuje korake, pozive alata ili trud zaključivanja (`/effort high`
-  postavlja razinu, `/effort steps 30`, kao i stari zapisi `/steps` i
-  `/toolcalls` zadržani kao aliasi, postavljaju ograničenje izravno). Sve ide
-  kroz vlastite postavljače sesije, pa se pamti i doseže sljedeću poruku.
+  postavlja razinu, a `/effort steps 30` i `/effort toolcalls 30` postavljaju
+  ograničenje izravno; zasebnih naredbi `/steps` i `/toolcalls` više nema).
+  Sve ide kroz vlastite postavljače sesije, pa se pamti i doseže sljedeću
+  poruku.
   `/doctor` pokreće provjeru okoline u skočni prozor.
   `/complete` (uz `/export` zadržan kao alias) jedini je čin završetka
   predmeta: nakon potvrde piše potpuni izvještaj o predmetu, paket dovršetka
@@ -361,10 +362,10 @@ risk columns) and keeps the plain-language naming pass below:
   `Enter` switches; `/model <id>` switches directly. `/effort` is the one
   surface for how much work a message may spend: pick a row and `Enter`
   edits the steps, the tool calls or the reasoning effort in place
-  (`/effort high` sets the level, and `/effort steps 30`, with the old
-  `/steps` and `/toolcalls` spellings kept as aliases, sets a limit
-  directly); everything goes through the session's own setters, so it
-  persists and reaches the next message. `/doctor` runs the
+  (`/effort high` sets the level, and `/effort steps 30` or
+  `/effort toolcalls 30` sets a limit directly; there are no separate
+  `/steps` and `/toolcalls` commands); everything goes through the session's
+  own setters, so it persists and reaches the next message. `/doctor` runs the
   environment check into a popup.
   `/complete` (with `/export` kept as its alias) is the one end-of-case act:
   confirmed first, it writes the full case report, the completion bundle
@@ -511,7 +512,7 @@ the prompt.
 While a run is in flight an animated `investigating` line under the message
 names the call in progress with its arguments and elapsed time, and a quiet
 `working…` row inside the exchange's ACTIVITY group counts the model requests
-as the audit record grows. `Ctrl+C` cancels the run; the model's reasoning
+as the run record grows. `Ctrl+C` cancels the run; the model's reasoning
 text is deliberately never recorded or shown — only request counts, token
 facts and outcomes.
 

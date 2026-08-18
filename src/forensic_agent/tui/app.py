@@ -43,12 +43,14 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme as RichTheme
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.geometry import Size
+from textual.message import Message
 from textual.reactive import Reactive, reactive
 from textual.screen import ModalScreen
 from textual.suggester import SuggestFromList
@@ -716,6 +718,43 @@ def _wordmark_text(mark: _Wordmark, *, tagline: bool) -> Text:
     return text
 
 
+class ConversationPane(VerticalScroll):
+    """The CONVERSATION pane, which says when it has been laid out anew.
+
+    The wordmark is chosen by measuring this pane, so the only moment worth
+    measuring at is the one Textual already announces here: a widget is sent
+    :class:`~textual.events.Resize` AFTER the compositor has given it its new
+    region, so ``content_size`` read from this handler is the size the pane
+    actually has rather than the one it is on its way to.
+
+    The app cannot use its own resize event for this. That one arrives BEFORE
+    the layout runs, which is why the header used to be corrected from a timer
+    a fixed delay later — a guess about how fast Textual lays out, and a guess
+    that a maximize on a full screen loses. When it lost, the deferred look
+    measured the pane at its PREVIOUS size, that reading matched the previous
+    reading, the header concluded it had settled and never looked again: the
+    mark kept the variant chosen for the old width until some later resize
+    happened to arrive.  :class:`~textual.events.Resize` does not bubble, so it
+    is re-announced as a message the app can subscribe to.
+    """
+
+    class Resized(Message):
+        """This pane has a new content box. Carries the pane, not its size.
+
+        The size is read at the moment the app handles this, never captured
+        here: two layouts in a row post two messages, and acting on the older
+        one's captured size would put the header back a step. The freshest
+        reading is always the pane's own.
+        """
+
+        def __init__(self, pane: ConversationPane) -> None:
+            self.pane = pane
+            super().__init__()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self.post_message(self.Resized(self))
+
+
 def _call_name(function: str, operation: str) -> Text:
     name = Text()
     name.append(function, style=M.ACCENT)
@@ -977,10 +1016,10 @@ def _records_table(rows: list, columns: list[str]) -> Table:
 def slash_completions() -> tuple[str, ...]:
     """Every name a slash command answers to, longest-priority first.
 
-    Aliases are included: ``/guardrails`` and ``/steps`` are typed by operators
-    who learned them, and a completion list that omitted them would quietly
-    teach that they no longer exist. Sorted so a shorter name is offered before
-    a longer one that extends it, which is the order the suggester consumes.
+    Aliases are included: ``/guardrails`` is typed by operators who learned
+    it, and a completion list that omitted it would quietly teach that it no
+    longer exists. Sorted so a shorter name is offered before a longer one
+    that extends it, which is the order the suggester consumes.
     """
 
     from forensic_agent.cli.commands import COMMAND_REGISTRY
@@ -1065,6 +1104,13 @@ class PromptInput(Input):
 
     BINDINGS = [
         Binding("tab", "accept_completion", "complete the command", show=False),
+        # Only ever live while the command list is open — see check_action.
+        # Bound unconditionally they would take the two keys an Input has no
+        # use for on one line but the console does elsewhere, and Esc above all:
+        # Esc is how the operator leaves the prompt for the panes.
+        Binding("down", "hint_next", "next command", show=False),
+        Binding("up", "hint_previous", "previous command", show=False),
+        Binding("escape", "hint_close", "close the list", show=False),
     ]
 
     # ``Input`` already declares this reactive as ``Reactive[str]``; it is
@@ -1080,6 +1126,53 @@ class PromptInput(Input):
     # and the inherited reactive descriptor is exactly the one that runs.
     value: Reactive[str]
 
+    def _owner(self) -> InvestigationApp | None:
+        """The console this line belongs to, or None if it is mounted elsewhere.
+
+        Named ``_owner`` rather than ``_console``: ``Widget._console`` is
+        Textual's own Rich console, and shadowing it with something else
+        entirely is how a widget stops being able to render itself.
+
+        The list being moved through lives on the app, because it is the app
+        that knows which commands the typed prefix still matches. Asked for
+        rather than assumed, so a PromptInput in a test harness or another
+        screen degrades to an ordinary input instead of raising.
+        """
+
+        app = self.app
+        return app if isinstance(app, InvestigationApp) else None
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """The list keys exist only while there is a list.
+
+        This is what keeps the fix that matters intact. The suggestion list may
+        never take the keyboard: it once did, and the console could not be
+        typed in. Up, Down and Esc are bound on the line rather than on the
+        list, and they are live only while the list is open — so with it closed
+        Esc still leaves the prompt for the panes, and every printable key
+        reaches the line at every moment, open or closed.
+        """
+
+        if action in ("hint_next", "hint_previous", "hint_close"):
+            console = self._owner()
+            return console is not None and console.command_hints_open
+        return True
+
+    def action_hint_next(self) -> None:
+        console = self._owner()
+        if console is not None:
+            console.move_command_hint(1)
+
+    def action_hint_previous(self) -> None:
+        console = self._owner()
+        if console is not None:
+            console.move_command_hint(-1)
+
+    def action_hint_close(self) -> None:
+        console = self._owner()
+        if console is not None:
+            console.close_command_hints()
+
     def action_accept_completion(self) -> None:
         """Take the offered completion and stand ready for an argument.
 
@@ -1087,8 +1180,22 @@ class PromptInput(Input):
         very next keystroke is the argument. Without the separator the operator
         has to notice the cursor is welded to the name and type the space
         themselves, which is the same interruption in a smaller form.
+
+        Which command is taken is whichever one the list is pointing at, which
+        with an untouched list is the first match — the same command the ghost
+        after the cursor already offered. Enter is deliberately NOT this key:
+        Enter sends the characters in the line and nothing else, which is the
+        whole reason this is a suggestion list and not the command palette.
         """
 
+        console = self._owner()
+        selected = console.selected_command_hint() if console is not None else None
+        if selected is not None and self.cursor_at_end:
+            completed = f"/{selected}"
+            if completed != self.value.strip():
+                self.value = f"{completed} "
+                self.cursor_position = len(self.value)
+                return
         suggestion = self._suggestion
         if not suggestion or not self.cursor_at_end or len(suggestion) <= len(self.value):
             return
@@ -1177,16 +1284,29 @@ class OverlayScreen(ModalScreen, _CopyableCard):
         Binding("C", "copy_receipt", "copy the receipt", show=False),
     ]
 
-    def __init__(self, title: str, renderable, *, card: FindingCard | None = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        renderable,
+        *,
+        card: FindingCard | None = None,
+        wide: bool = False,
+    ) -> None:
         super().__init__()
         self._title = title
         self._renderable = renderable
         # Only a drawer showing a finding has anything to copy; /help and
         # /status offer no keys they cannot honour.
         self._card = card
+        # Reference material — the command sheet — is read across, not down: a
+        # drawer a hundred cells wide on a two-hundred-cell screen folded every
+        # description into three lines with half the window unused beside it.
+        # A finding card keeps the narrow measure, which is what makes a
+        # paragraph readable.
+        self._wide = wide
 
     def compose(self) -> ComposeResult:
-        box_ = Vertical(id="overlay-box")
+        box_ = Vertical(id="overlay-box", classes="wide" if self._wide else None)
         box_.border_title = self._title
         box_.border_subtitle = (
             f"esc closes   {self.COPY_HINT}" if self._card is not None else "esc closes"
@@ -1407,8 +1527,9 @@ class EffortScreen(ModalScreen[None]):
 
     Three rows, steps, tool calls and reasoning effort, and Enter opens the
     matching editor; the fixed model-request ceiling is stated beneath. This
-    is the one surface for all of it: /effort, with /steps and /toolcalls
-    surviving only as typed aliases.
+    is the one surface for all of it, reached by the one command that names
+    it: /effort, and the budgets are its arguments rather than commands of
+    their own.
     """
 
     BINDINGS = [
@@ -2159,6 +2280,10 @@ class InvestigationApp(App):
        collapses and centering never happens; an auto child with a small
        min-height centers there for real. */
     #guardrails-pane .pane-hint { height: auto; min-height: 3; }
+    /* The reference sheets: as wide as the window allows, because what is in
+       them is a table. max-width keeps a line of prose from running past the
+       measure at which it stops being readable on a very wide screen. */
+    #overlay-box.wide { width: 96%; max-width: 200; }
     #overlay-box, #choice-box {
         width: 100; max-width: 95%;
         height: auto; max-height: 84%;
@@ -2259,6 +2384,11 @@ class InvestigationApp(App):
         self._current_args = ""
         self._activity_rows: set[str] = set()
         self._activity_log: dict[int, ToolEvent] = {}
+        #: The commands the typed prefix still matches, and which of them the
+        #: list is pointing at. Held rather than recomputed per keystroke of an
+        #: arrow key: moving through the list must not re-scan the registry.
+        self._hint_matches: tuple[tuple[str, str, str], ...] = ()
+        self._hint_index = 0
         self._evidence_cards: list[FindingCard] = []
         self._evidence_lists: dict[int, ListView] = {}
         self._guardrail_groups: dict[int, Vertical] = {}
@@ -2293,7 +2423,7 @@ class InvestigationApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="body"):
             with Vertical(id="leftcol"):
-                conversation = VerticalScroll(id="conversation")
+                conversation = ConversationPane(id="conversation")
                 conversation.can_focus = True
                 yield conversation
             with Vertical(id="rightcol"):
@@ -2485,7 +2615,7 @@ class InvestigationApp(App):
     _SESSION_PANEL_CHROME = 4
     _WELCOME_BLANK_ROWS = 3
 
-    def _header_room(self) -> tuple[int, int]:
+    def _header_room(self, content: Size | None = None) -> tuple[int, int]:
         """The cells the wordmark may occupy: (width, height).
 
         Measured off the conversation's own content box, never off the terminal:
@@ -2495,27 +2625,35 @@ class InvestigationApp(App):
         its word — the smallest rendering is drawn and :meth:`_refresh_header`
         corrects it once the layout lands, which is the safe direction to be
         wrong in.
+
+        ``content`` is the pane's own box when the pane itself is what asked;
+        passing it keeps a resize off the DOM entirely, which is the difference
+        between a drag costing one attribute read per event and one query.
         """
 
-        try:
-            content = self.query_one("#conversation", VerticalScroll).content_size
-        except NoMatches:
-            # A deferred recheck can outlive the console it was measuring; a
-            # header that cannot find its pane simply has no room.
-            return (0, 0)
+        if content is None:
+            try:
+                content = self.query_one("#conversation", ConversationPane).content_size
+            except NoMatches:
+                # A deferred recheck can outlive the console it was measuring; a
+                # header that cannot find its pane simply has no room.
+                return (0, 0)
         reserved = (
             self._session_rows + self._SESSION_PANEL_CHROME + self._WELCOME_BLANK_ROWS
         )
         return content.width, max(0, content.height - reserved)
 
-    def _header_choice(self) -> tuple[str, bool]:
+    def _header_choice(self, room: tuple[int, int] | None = None) -> tuple[str, bool]:
         """Which rendering the pane can hold, as (variant name, tagline).
 
         The identity of what is on screen, so a resize that does not change it
         can skip the repaint entirely. "" names the case where no wordmark fits.
+
+        ``room`` is an already-taken measurement; re-measuring here would read
+        the same pane twice for one decision.
         """
 
-        width, height = self._header_room()
+        width, height = self._header_room() if room is None else room
         mark = _wordmark_for(width, height)
         if mark is None:
             return ("", False)
@@ -2529,59 +2667,76 @@ class InvestigationApp(App):
         theme switch redraws it in the new gradient (see :func:`_painted`).
         """
 
-        name, tagline = self._header_choice()
-        self._header_shown = (name, tagline)
+        return self._banner_for(self._header_choice())
+
+    def _banner_for(self, choice: tuple[str, bool]):
+        """One rendering, drawn from a choice that has already been made.
+
+        Split from :meth:`_banner_renderable` so the resize path can decide and
+        draw from a single measurement: the decision is what says whether to
+        draw at all, and re-deriving it inside the drawing would measure again.
+        """
+
+        name, tagline = choice
+        self._header_shown = choice
         if not name:
             return Text("")
         mark = next(mark for mark in _WORDMARKS if mark.name == name)
         return _wordmark_text(mark, tagline=tagline)
 
-    #: How long after a resize the panes have been given their new sizes. A
-    #: resize event reaches the app BEFORE the layout runs, so measuring the
-    #: conversation at that moment returns the width it had a moment ago — this
-    #: is the same lag the size guard was fixed for, one layer down. The exact
-    #: figure does not have to be right, because :meth:`_refresh_header` keeps
-    #: looking while the measurement is still moving; it only has to be short
-    #: enough to be invisible and long enough not to spin.
+    #: How long after a mount the pane has been laid out and the Session panel
+    #: has been built, so the room the wordmark was first drawn into can be
+    #: measured for real. A mount is the only thing this delay covers; a resize
+    #: is announced by the pane itself, after its layout, so no delay chosen
+    #: here can be wrong about it.
     _HEADER_SETTLE_S = 0.05
 
     def _recheck_header_soon(self) -> None:
-        """Look again once the layout has settled, at most once per burst."""
+        """Look again once the mount has settled, at most once per burst."""
 
         if self._header_recheck_queued:
             return
         self._header_recheck_queued = True
         self.set_timer(self._HEADER_SETTLE_S, self._refresh_header)
 
-    def _refresh_header(self) -> None:
+    @on(ConversationPane.Resized)
+    def _conversation_resized(self, message: ConversationPane.Resized) -> None:
+        """The pane has been laid out anew, so the mark is re-chosen for it.
+
+        Every resize reaches the header through here — a drag, a maximize, a
+        restore from minimised — because every one of them ends in a layout and
+        the layout is what posts this. Nothing is polled, and nothing is assumed
+        about how long a layout takes.
+        """
+
+        self._refresh_header(message.pane.content_size)
+
+    def _refresh_header(self, content: Size | None = None) -> None:
         """Redraw the wordmark, but only if the pane now holds a different one.
 
-        This is the whole of the resize cost. Choosing takes two integer
-        comparisons; repainting takes a render, and doing that on every event of
-        a drag is what would stutter. A drag across the full range crosses two
-        boundaries, so it costs two repaints however many events it emitted.
-
-        The pane is re-measured until the measurement stops changing, which is
-        what makes the delay above an implementation detail rather than a
-        promise about how fast Textual lays out.
+        This is the whole of the resize cost, and on the common path it is two
+        comparisons. The pane's box is checked against the last one measured
+        first, because a drag emits an event per cell and almost none of them
+        change the box at all; then the variant is chosen, which is a handful
+        of integer comparisons over three fixed renderings; and only a width
+        that crosses a boundary between them reaches the repaint. A drag across
+        the whole range therefore costs two renders however many events it
+        emitted, and a height-only change costs none.
         """
 
         self._header_recheck_queued = False
         banner = getattr(self, "_banner_widget", None)
         if banner is None or not banner.is_mounted:
             return
-        room = self._header_room()
-        if room != self._header_room_seen:
-            # The layout is still moving. Drawing from a measurement that is
-            # about to change is how a shrink puts the wide mark into a pane
-            # that has already narrowed — briefly, but that IS the defect — so
-            # nothing is drawn until two consecutive looks agree.
-            self._header_room_seen = room
-            self._recheck_header_soon()
+        room = self._header_room(content)
+        if room == self._header_room_seen:
+            # Nothing measured has moved: nothing to decide, nothing to draw.
             return
-        if self._header_choice() == self._header_shown:
+        self._header_room_seen = room
+        choice = self._header_choice(room)
+        if choice == self._header_shown:
             return
-        banner.update(self._banner_renderable())
+        banner.update(self._banner_for(choice))
 
     # Below this, panes collapse into uselessness; the guard takes over the
     # screen and says exactly what size the console needs.
@@ -2594,11 +2749,12 @@ class InvestigationApp(App):
         # one resize behind — hidden over crushed panes after a snap down,
         # covering a full-size terminal after a snap back up.
         size = getattr(event, "size", None) or self.size
-        # The panes have not been re-laid-out yet either, so the conversation
-        # still reports the width it had before this event; measuring it here
-        # would keep the header one resize behind exactly as the guard was.
-        # One deferred recheck per burst settles it after the layout lands.
-        self._recheck_header_soon()
+        # The wordmark is deliberately NOT chosen here. The panes have not been
+        # re-laid-out yet, so the conversation still reports the width it had
+        # before this event, and a delay long enough to wait that out on one
+        # machine is too short on another — a maximize that outran the delay
+        # left the mark at the width it had before. It is chosen instead when
+        # the pane itself says it has been laid out (ConversationPane.Resized).
         self._keep_the_end_in_view()
         for guard in self.query("#size-guard").results(Static):
             too_small = size.width < self.MIN_WIDTH or size.height < self.MIN_HEIGHT
@@ -2867,9 +3023,12 @@ class InvestigationApp(App):
         each command's own usage beside it, and the list narrows keystroke by
         keystroke until the argument starts.
 
-        Nothing here can be selected and nothing here has focus — it is a
-        Static. Enter goes on submitting the characters in the line, which is
-        what the command palette that once opened on ``/`` did not do.
+        Nothing here has focus and nothing here can take a keystroke — it is a
+        Static. It is moved through from the line instead: Up and Down are
+        bound on the input, live only while this is on screen, so typing goes
+        on working at every moment. That is not a detail. This list replaced a
+        command palette that took the keyboard, and the console could not be
+        typed in while it was open.
         """
 
         try:
@@ -2878,31 +3037,130 @@ class InvestigationApp(App):
             return
         matches = matching_commands(typed)
         if not matches:
+            self._hint_matches = ()
+            self._hint_index = 0
             hints.display = False
             return
-        rows = Table.grid(padding=(0, 2))
+        if tuple(name for name, _u, _d in matches) != tuple(
+            name for name, _u, _d in self._hint_matches
+        ):
+            # A different set of commands is a different list, so the cursor
+            # goes back to the top of it. Narrowing to the SAME set — another
+            # character of an argument — leaves the operator's choice alone.
+            self._hint_index = 0
+        self._hint_matches = matches
+        self._hint_index = max(0, min(self._hint_index, len(matches) - 1))
+        self._paint_command_hints()
+        hints.display = True
+
+    @property
+    def command_hints_open(self) -> bool:
+        """Whether there is a list on screen to be moved through."""
+
+        if not self._hint_matches:
+            return False
+        try:
+            return bool(self.query_one("#command-hints", Static).display)
+        except NoMatches:
+            return False
+
+    def selected_command_hint(self) -> str | None:
+        """The name of the command the list is pointing at, or None."""
+
+        if not self.command_hints_open:
+            return None
+        return self._hint_matches[self._hint_index][0]
+
+    def move_command_hint(self, delta: int) -> None:
+        """Move the cursor through the list and scroll it into view.
+
+        Stops at the ends rather than wrapping, which is what every other list
+        in this console does — the effort rows, the evidence list, the choosers
+        are all Textual lists, and none of them wraps.
+
+        Cheap by construction: the matches are already held, so this is one
+        addition, one clamp and one repaint of at most eight rows. Nothing is
+        re-matched against the registry and nothing is measured.
+        """
+
+        if not self.command_hints_open:
+            return
+        moved = max(0, min(self._hint_index + delta, len(self._hint_matches) - 1))
+        if moved == self._hint_index:
+            return
+        self._hint_index = moved
+        self._paint_command_hints()
+
+    def close_command_hints(self) -> None:
+        """Esc takes the list down and leaves the typed characters alone."""
+
+        self._hint_matches = ()
+        self._hint_index = 0
+        self._hide_command_hints()
+
+    def _paint_command_hints(self) -> None:
+        """Draw the window of the list that holds the selected row.
+
+        Eight rows at a time out of as many as the registry has, scrolled so
+        the cursor is always one of them, with the count above and below
+        stated on the frame — an operator who cannot see row nine has to be
+        told there is a row nine.
+        """
+
+        try:
+            hints = self.query_one("#command-hints", Static)
+        except NoMatches:
+            return
+        matches = self._hint_matches
+        total = len(matches)
+        # The window slides only as far as it must to hold the cursor, so a
+        # list that fits does not move at all.
+        first = max(0, min(self._hint_index - _HINTS_SHOWN + 1, total - _HINTS_SHOWN))
+        first = max(0, min(first, self._hint_index))
+        window = matches[first : first + _HINTS_SHOWN]
+        rows = Table.grid(padding=(0, 1))
+        rows.add_column(no_wrap=True)
         rows.add_column(style=f"bold {M.ACCENT}", no_wrap=True)
         rows.add_column(style=M.DIM, no_wrap=True)
         rows.add_column(style=M.TEXT, overflow="ellipsis")
-        for name, usage, description in matches[:_HINTS_SHOWN]:
+        for offset, (name, usage, description) in enumerate(window):
+            selected = first + offset == self._hint_index
             argument = usage[len(f"/{name}"):].strip()
             # A usage line is mostly square brackets, and a Table cell given a
             # str is parsed as markup: unescaped, /model's ``[list [all|<text>]
             # |<model-id>]`` renders with the nested part eaten as a style tag.
-            rows.add_row(f"/{name}", Text(argument), Text(description))
+            pointer = Text(
+                f"{M.GLYPH_POINT} " if selected else "  ",
+                style=f"bold {M.ACCENT}" if selected else M.DIM,
+            )
+            row_style = f"on {M.ACCENT_MUTED}" if selected else ""
+            rows.add_row(
+                pointer,
+                Text(f"/{name}"),
+                Text(argument),
+                Text(description),
+                style=row_style,
+            )
         hints.update(rows)
-        hints.border_title = (
-            f"{len(matches)} commands" if len(matches) > 1 else "1 command"
-        )
-        remaining = len(matches) - _HINTS_SHOWN
+        hints.border_title = f"{total} commands" if total > 1 else "1 command"
+        above = first
+        below = total - (first + len(window))
+        marks: list[str] = []
+        if above:
+            marks.append(f"{above} above")
+        if below:
+            marks.append(f"{below} below")
         hints.border_subtitle = (
-            f"{remaining} more — keep typing" if remaining > 0 else "Tab completes"
+            f"{'   '.join(marks)}   ↑↓ moves   Tab takes it"
+            if marks
+            else "↑↓ moves   Tab takes it"
         )
-        hints.display = True
 
     def _hide_command_hints(self) -> None:
         """Take the list down: the line was sent, cleared or handed elsewhere."""
 
+        self._hint_matches = ()
+        self._hint_index = 0
         try:
             self.query_one("#command-hints", Static).display = False
         except NoMatches:
@@ -3025,12 +3283,7 @@ class InvestigationApp(App):
             self.notify("Unknown command. Press ? or type /help.", title="unknown command")
             return
         if parsed is not None:
-            argument = parsed.argument_text
-            # /steps and /toolcalls survive as aliases of /effort: the old
-            # muscle memory keeps working, the surface stays one command.
-            if parsed.name == "effort" and parsed.invoked_as in ("steps", "toolcalls"):
-                argument = f"{parsed.invoked_as} {argument}".strip()
-            self.dispatch_command(parsed.name, argument)
+            self.dispatch_command(parsed.name, parsed.argument_text)
 
     #: Commands safe while a message is being investigated. One test decides
     #: membership: the command may not change what the session holds, may not
@@ -3137,7 +3390,13 @@ class InvestigationApp(App):
 
         try:
             self.push_screen(
-                OverlayScreen("Commands", build_help_renderable(argument or None))
+                OverlayScreen(
+                    "Commands",
+                    build_help_renderable(argument or None, palette=M.palette()),
+                    # One command's block is a paragraph; the whole sheet is a
+                    # reference table and is given the window to be one.
+                    wide=not argument,
+                )
             )
         except UnknownCommandError:
             # A mistyped name deserves the truth, not the generic sheet.
@@ -3287,9 +3546,9 @@ class InvestigationApp(App):
 
         The reasoning effort and the step and tool-call limits govern the same
         thing from two sides, and they were two commands opening one screen.
-        The screen is the same; the typed forms survive for muscle memory
-        (/effort steps 30, and the /steps and /toolcalls aliases), and a level
-        name sets the reasoning effort without it.
+        The screen is the same, one command names it, and the budgets are
+        arguments to that command (/effort steps 30) rather than commands of
+        their own; a level name sets the reasoning effort without the screen.
         """
 
         from forensic_agent.cli.reasoning import normalize_effort
@@ -7196,26 +7455,87 @@ class InvestigationApp(App):
             )
         self.push_screen(OverlayScreen("Evidence", Group(*lines)))
 
-    def action_activity(self) -> None:
-        """a shows the feed at once: the newest exchange unfolds without Enter."""
+    def _activity_block(self) -> RenderableType:
+        """Every call the feed has recorded, as one block, newest exchange last.
 
-        pane = self.query_one("#activity", VerticalScroll)
-        groups = list(pane.query(Collapsible))
-        if not groups:
-            # An empty feed still answers, like g's empty Guardrails.
-            self.push_screen(
-                OverlayScreen(
-                    "Activity",
-                    Text(
-                        "Every tool call the agent makes lands here as it "
-                        "runs, grouped per message. Send a message first.",
-                        style=M.TEXT,
-                    ),
-                )
+        Read off the rows already on screen rather than from a second copy of
+        the feed: ``_activity_log`` holds the exchange in flight and is emptied
+        between messages, so a record built from it would show the newest
+        message and nothing before it. The rows carry their own recipe (see
+        :func:`_painted`), so re-running it draws them in the palette in force
+        now, at the width the drawer gives them rather than the pane's.
+
+        Built when the key is pressed and not before: a feed of several hundred
+        rows costs nothing until somebody asks to read it whole.
+        """
+
+        try:
+            pane = self.query_one("#activity", VerticalScroll)
+        except NoMatches:
+            # The simple layout has no pane; its rows are in the transcript.
+            return Text(
+                "This layout writes the activity into the conversation itself, "
+                "under each answer. /layout full puts it back in a pane.",
+                style=M.TEXT,
             )
-            pane.focus()
+        blocks: list[RenderableType] = []
+        exchange = ""
+        for row in pane.query(Static).results(Static):
+            identifier = row.id or ""
+            if not identifier.startswith("act-"):
+                continue
+            parts = identifier.split("-")
+            if len(parts) > 1 and parts[1] != exchange:
+                exchange = parts[1]
+                if blocks:
+                    blocks.append(Text(""))
+                blocks.append(
+                    Rule(
+                        Text(f"MESSAGE {exchange}", style=f"bold {M.ACCENT}"),
+                        style=M.BORDER,
+                        align="left",
+                    )
+                )
+            # The recipe when the row has one, so the drawer draws it in the
+            # palette in force now; otherwise whatever the row was built from.
+            # Read through getattr because a colourless row is a plain Static
+            # and carries no recipe at all.
+            build = getattr(row, "_dfir_build", None)
+            if callable(build):
+                blocks.append(build())
+                continue
+            drawn = getattr(row, "_renderable", None)
+            if drawn is not None:
+                blocks.append(cast(RenderableType, drawn))
+        if not blocks:
+            return Text(
+                "Every tool call the agent makes lands here as it runs, "
+                "grouped per message. Send a message first.",
+                style=M.TEXT,
+            )
+        return Group(*blocks)
+
+    def action_activity(self) -> None:
+        """a opens the whole feed, the way g opens Guardrails and e evidence.
+
+        The three panes answer their key the same way: the key shows the thing,
+        expanded, in a drawer that scrolls and closes on Esc. This one used to
+        do half of that — it unfolded the newest group in the pane and focused
+        it, so the feed could be read only through a pane a few rows tall, and
+        only one message at a time. The pane is still unfolded and focused, so
+        Esc lands the operator where the arrows browse, exactly as e does.
+        """
+
+        self.push_screen(
+            OverlayScreen("Activity", self._activity_block(), wide=True)
+        )
+        try:
+            pane = self.query_one("#activity", VerticalScroll)
+        except NoMatches:
             return
-        groups[-1].collapsed = False
+        groups = list(pane.query(Collapsible))
+        if groups:
+            groups[-1].collapsed = False
         pane.scroll_end(animate=False)
         titles = list(pane.query("CollapsibleTitle"))
         if titles:

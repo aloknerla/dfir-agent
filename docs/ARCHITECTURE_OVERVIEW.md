@@ -528,7 +528,7 @@ flowchart LR
 ```
 
 The arrows that do not exist are the point of the diagram. The model has no edge
-to the evidence, to the scratch directory, or to the audit log. Its only outgoing
+to the evidence, to the scratch directory, or to the run record. Its only outgoing
 edge is a proposed call, and that edge terminates at the gate.
 
 ### The capability vocabulary

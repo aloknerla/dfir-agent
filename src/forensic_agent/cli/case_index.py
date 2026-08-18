@@ -41,11 +41,11 @@ _INDEX_DIRECTORY_NAME = "entity-index"
 ProgressReport = Callable[[float | None, str | None], None]
 
 #: What the operator is told this step IS, for the whole length of it. The
-#: scanner announces its own phase once and then blocks inside a subprocess
-#: whose output is captured rather than streamed, so that phase name would
-#: appear, never be replaced, and leave a row nobody could match to a step. One
-#: name held for the duration is what lets an operator tell this step from the
-#: evidence digest and the memory hash that run beside it.
+#: scanner names its own phase, and that name would appear, never be replaced,
+#: and leave a row nobody could match to a step. One name held for the duration
+#: is what lets an operator tell this step from the evidence digest and the
+#: memory hash that run beside it — while the fraction underneath it moves,
+#: because the scan is read as it prints rather than after it exits.
 INDEX_STEP = "Indexing evidence"
 
 

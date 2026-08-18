@@ -71,6 +71,66 @@ function Assert-LocalDockerEndpoint {
 
 Assert-LocalDockerEndpoint
 
+# --rebuild belongs to the launcher and not to the console, so the token is
+# taken out of the argument list here and can never reach the containerized
+# CLI. The build runs through the same --project-directory and --file as the
+# run at the bottom of this script, which is the only reason the image it
+# produces is the image the launcher then starts. Typing "docker compose build
+# console" somewhere other than the project directory names another project and
+# builds an image nothing here ever runs, which costs a rebuild and leaves the
+# operator looking at the old console.
+$rebuildRequested = $false
+if ($AgentArguments -and $AgentArguments.Count -gt 0) {
+    $keptArguments = [System.Collections.Generic.List[string]]::new()
+    foreach ($argument in $AgentArguments) {
+        if ($argument -ieq "--rebuild") {
+            $rebuildRequested = $true
+            continue
+        }
+        $keptArguments.Add($argument)
+    }
+    $AgentArguments = @($keptArguments.ToArray())
+}
+
+if ($rebuildRequested) {
+    if ($AgentArguments -and $AgentArguments.Count -gt 0) {
+        throw (
+            "--rebuild rebuilds the console image and does nothing else. Run " +
+            "it on its own, then start the console."
+        )
+    }
+    Write-Host "Rebuilding the dfir-agent console image from $projectRoot."
+    # PowerShell 7.3 and later turn a non-zero native exit status into a
+    # terminating error while $ErrorActionPreference is Stop. A build that
+    # fails has already printed why, so its status is passed on instead.
+    $nativePreference = Get-Variable `
+        -Name PSNativeCommandUseErrorActionPreference `
+        -ErrorAction SilentlyContinue
+    if ($null -ne $nativePreference) {
+        $previousNativePreference = $nativePreference.Value
+        Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false
+    }
+    try {
+        & docker compose `
+            --project-directory $projectRoot `
+            --file $composeFile `
+            build console
+        $buildStatus = $LASTEXITCODE
+    }
+    finally {
+        if ($null -ne $nativePreference) {
+            Set-Variable `
+                -Name PSNativeCommandUseErrorActionPreference `
+                -Value $previousNativePreference
+        }
+    }
+    if ($buildStatus -ne 0) {
+        exit $buildStatus
+    }
+    Write-Host "Rebuilt. Start the console with: dfir-agent"
+    exit 0
+}
+
 function Clear-PrivateEvidenceRoot {
     if (-not (Test-Path -LiteralPath $privateEvidenceRoot)) {
         return
@@ -884,10 +944,10 @@ function Get-StalenessWarnings {
         )
         $warnings.Add("  image built:   $imageWhen")
         $warnings.Add("  newest commit: $commitWhen")
-        $warnings.Add(
-            "  rebuild: docker compose --project-directory $projectRoot " +
-            "--file $composeFile build console"
-        )
+        # The launcher's own command rather than a Compose line: it already
+        # knows the compose file and the project this image belongs to, so
+        # there is nothing left for the operator to get wrong.
+        $warnings.Add("  rebuild: dfir-agent --rebuild")
     }
     return $warnings.ToArray()
 }

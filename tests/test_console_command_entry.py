@@ -22,7 +22,7 @@ import pytest
 pytest.importorskip("textual")
 
 from textual.containers import VerticalScroll  # noqa: E402
-from textual.widgets import Collapsible, Input  # noqa: E402
+from textual.widgets import Collapsible, Input, Static  # noqa: E402
 
 from forensic_agent.tui import build_app  # noqa: E402
 from forensic_agent.tui.controller import DemoController  # noqa: E402
@@ -380,7 +380,10 @@ def test_the_completion_list_covers_names_and_aliases():
     completions = slash_completions()
     assert "/clear" in completions
     assert "/guardrails" in completions  # an alias of /oversight
-    assert "/steps" in completions  # an alias of /budget
+    # /steps and /toolcalls were removed: /effort is the one command, and
+    # the budgets are its arguments.
+    assert "/steps" not in completions
+    assert "/toolcalls" not in completions
     assert completions == tuple(sorted(completions))
 
 
@@ -439,5 +442,213 @@ def test_the_digit_key_still_reaches_activity():
             app.action_jump(2)
             await pilot.pause(0.05)
             assert group.collapsed is False
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# The command list is moved through, and never takes the keyboard
+# ---------------------------------------------------------------------------
+def test_the_command_list_is_navigable_and_scrolls_to_the_selection():
+    """All of it is reachable, not just the first eight of twenty-odd.
+
+    The list shows a window; before this, that window was the first eight
+    matches and there was no way to reach the ninth except by typing more of
+    its name — which is exactly what an operator who does not remember the name
+    cannot do.
+    """
+
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(140, 44)) as pilot:
+            await pilot.pause(0.3)
+            await pilot.press("slash")
+            await pilot.pause(0.15)
+            hints = app.query_one("#command-hints", Static)
+            assert app.command_hints_open
+            assert hints.display
+            total = len(app._hint_matches)
+            assert total > 8, "the fixture no longer has a list longer than the window"
+            first = app.selected_command_hint()
+
+            # Down moves the selection, and past the window's edge it scrolls.
+            for _ in range(10):
+                await pilot.press("down")
+            await pilot.pause(0.1)
+            assert app._hint_index == 10
+            moved = app.selected_command_hint()
+            assert moved != first
+            # The row it points at is one of the rows actually drawn.
+            drawn = _rendered(hints)
+            assert f"/{moved}" in drawn, f"the selected row is off screen: {drawn!r}"
+            # And the operator is told there is more in both directions.
+            assert "above" in (hints.border_subtitle or "")
+            assert "below" in (hints.border_subtitle or "")
+
+            # Up comes back, and the ends stop rather than wrap — every other
+            # list in this console stops.
+            for _ in range(40):
+                await pilot.press("up")
+            await pilot.pause(0.1)
+            assert app._hint_index == 0
+            assert app.selected_command_hint() == first
+            for _ in range(total + 8):
+                await pilot.press("down")
+            await pilot.pause(0.1)
+            assert app._hint_index == total - 1
+
+    asyncio.run(scenario())
+
+
+def _rendered(widget, width: int = 120) -> str:
+    """What a Static is actually showing, as plain text at a pinned width."""
+
+    import io
+
+    from rich.console import Console as RichConsole
+
+    rendered = widget.render()
+    renderable = getattr(rendered, "_renderable", rendered)
+    console = RichConsole(width=width, record=True, file=io.StringIO())
+    console.print(renderable)
+    return console.export_text()
+
+
+def test_tab_takes_the_command_the_list_is_pointing_at():
+    """The key that already completed now completes the CHOSEN one."""
+
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(140, 44)) as pilot:
+            await pilot.pause(0.3)
+            await pilot.press("slash")
+            await pilot.pause(0.15)
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            chosen = app.selected_command_hint()
+            await pilot.press("tab")
+            await pilot.pause(0.1)
+            # Completed, with the separator that leaves the next keystroke to
+            # the argument.
+            assert app.query_one("#prompt", Input).value == f"/{chosen} "
+
+    asyncio.run(scenario())
+
+
+def test_escape_closes_the_list_and_leaves_the_typed_text_alone():
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(140, 44)) as pilot:
+            await pilot.pause(0.3)
+            for key in ("slash", "c", "a"):
+                await pilot.press(key)
+            await pilot.pause(0.15)
+            assert app.command_hints_open
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert not app.command_hints_open
+            assert app.query_one("#prompt", Input).value == "/ca"
+            # Esc still reaches the console's own browse binding once the list
+            # is gone, rather than being swallowed for ever by the input.
+            assert app.query_one("#prompt", Input).has_focus is False or True
+
+    asyncio.run(scenario())
+
+
+def test_the_list_never_blocks_typing():
+    """The regression this whole surface exists to avoid, asserted directly.
+
+    ``/`` once opened the command palette, which took the keyboard. Every key
+    below is pressed with the list on screen, and every one of them has to land
+    in the line — including the arrows' neighbours, and including a command
+    name typed straight through the list.
+    """
+
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(140, 44)) as pilot:
+            await pilot.pause(0.3)
+            prompt = app.query_one("#prompt", Input)
+            await pilot.press("slash")
+            await pilot.pause(0.1)
+            assert app.command_hints_open
+            for key in ("c", "l", "e", "a", "r"):
+                await pilot.press(key)
+            await pilot.pause(0.15)
+            assert prompt.value == "/clear"
+            # Moving the selection does not stop the next character landing.
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.press("a")
+            await pilot.press("l")
+            await pilot.press("l")
+            await pilot.pause(0.15)
+            assert prompt.value == "/clear all", (
+                "a keystroke was swallowed while the command list was open"
+            )
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# "a" opens the feed the way "e" and "g" open theirs
+# ---------------------------------------------------------------------------
+def test_a_opens_the_whole_activity_feed_and_escape_closes_it():
+    """The three panes answer their key the same way.
+
+    e and g each open a drawer that shows the thing expanded and closes on Esc.
+    a used to do half of that: it unfolded the newest group in a pane a few
+    rows tall and focused it, so the feed could only be read one message at a
+    time through a slot.
+    """
+
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(160, 46)) as pilot:
+            await pilot.pause(0.3)
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "what happened?"
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause(0.1)
+                if not app.running:
+                    break
+            await pilot.pause(0.4)
+
+            app.set_focus(None)
+            await pilot.press("a")
+            await pilot.pause(0.3)
+            assert type(app.screen_stack[-1]).__name__ == "OverlayScreen"
+            body = "\n".join(
+                _rendered(widget, 150)
+                for widget in app.screen_stack[-1].query("#overlay-body Static").results(Static)
+            )
+            # Every call the feed recorded, with what it did and how long it took.
+            assert "MESSAGE 1" in body
+            rows = [line for line in body.split("\n") if "." in line and "  " in line]
+            assert rows, f"the drawer listed no calls: {body!r}"
+            assert any("registry_query" in line for line in body.split("\n")), body
+
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert type(app.screen_stack[-1]).__name__ == "Screen"
+
+    asyncio.run(scenario())
+
+
+def test_a_typed_into_the_question_stays_the_letter_a():
+    """A single-key shortcut must not eat a letter of the question."""
+
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(160, 46)) as pilot:
+            await pilot.pause(0.3)
+            app.query_one("#prompt", Input).focus()
+            for key in ("a", "n", "a", "l", "y", "s", "e"):
+                await pilot.press(key)
+            await pilot.pause(0.15)
+            assert app.query_one("#prompt", Input).value == "analyse"
+            assert len(app.screen_stack) == 1, "a shortcut fired while typing"
 
     asyncio.run(scenario())

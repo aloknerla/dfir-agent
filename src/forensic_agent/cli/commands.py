@@ -491,7 +491,6 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "reasoning effort and the step and tool-call limits.",
         CommandCategory.SYSTEM,
         "/effort [none|low|medium|high|steps N|toolcalls N]",
-        aliases=("steps", "toolcalls"),
         detail=(
             "A bare /effort opens the effort screen: pick a row and Enter "
             "edits it. The levels none, low, medium and high set how much "

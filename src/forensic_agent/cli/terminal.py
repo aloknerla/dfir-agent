@@ -97,10 +97,6 @@ TABLE_BOX = box.SIMPLE_HEAD
 def _command_form(command_spec: CommandSpec) -> Text:
     """The exact string to type, with any alias trailing it quietly.
 
-    One column holds the form the operator types, rather than spending a second
-    column repeating the name the usage already begins with; that is both shorter
-    and gives the description the width it needs.
-
     Rendered as Text, never as markup: a usage line spells an optional argument
     "[all]", "[en|hr]", and Rich would read those brackets as a style tag and
     drop the very syntax the operator has to type.
@@ -113,31 +109,91 @@ def _command_form(command_spec: CommandSpec) -> Text:
     return form
 
 
-def build_help_renderable(command: str | None = None) -> RenderableType:
-    """Render the command reference as separately titled, category-sized groups.
+def _command_name(command_spec: CommandSpec) -> Text:
+    """Just the name, with any alias trailing it quietly.
+
+    The name and the argument syntax are two columns rather than one, because
+    one command's syntax is far longer than every other's and a single column
+    is as wide as its widest member. Sharing a column with
+    ``[none|low|medium|high|steps N|toolcalls N]`` left the descriptions of all
+    twenty-odd commands a quarter of the sheet wide, wrapping after three words
+    each; split, the syntax column answers for its own outlier and the
+    descriptions get the rest of the width.
+    """
+
+    name = Text(f"/{command_spec.name}")
+    if command_spec.aliases:
+        aliases = ", ".join(f"/{alias}" for alias in command_spec.aliases)
+        name.append(f"  ({aliases})", style=DIM)
+    return name
+
+
+def _command_arguments(command_spec: CommandSpec) -> Text:
+    """What the usage line says may follow the name, or "" when nothing may.
+
+    Read off the usage rather than kept beside it, and defensively: a usage
+    that does not begin with its own name is shown whole rather than sliced at
+    a prefix it does not have.
+    """
+
+    usage = command_spec.usage.strip()
+    prefix = f"/{command_spec.name}"
+    if usage.startswith(prefix):
+        usage = usage[len(prefix) :].strip()
+    return Text(usage)
+
+
+#: Below this the three-column sheet has nothing left to give the descriptions:
+#: the name column and the widest argument syntax in the registry together take
+#: some seventy cells, and what remained was a description column four words
+#: wide. Under it the sheet drops to two columns instead, which is the same
+#: information laid out for a window that cannot hold three.
+_HELP_THREE_COLUMN_WIDTH = 116
+
+
+def _help_sections(width: int, palette: dict[str, str] | None) -> RenderableType:
+    """The command reference laid out for a surface ``width`` cells wide.
 
     The full listing is what an operator reaches for to find the next command,
     so the groups have to be findable before the rows are readable. A category
     row sitting flush inside the same table read as one more command; each group
-    now carries its own heading and its own ruled table, in the shape /tools
-    already sets, with a blank line holding the groups apart. The column
-    geometry is fixed across every group so the five tables still line up as one
-    reference sheet, and an alternating row fill keeps a description that wraps
-    from bleeding into the command below it.
+    carries its own heading, with a blank line holding the groups apart, and the
+    column geometry is fixed across every group so the tables line up as one
+    reference sheet.
 
-    Help for one command stays a short block, since there the reader already
-    knows what they want and only needs its exact form.
+    Three things this sheet deliberately does NOT do, each because the opposite
+    was tried and read badly:
+
+    * It does not repeat the column headings. Five tables meant the word
+      "Command" five times down one screen, and a heading restated every eight
+      rows reads as part of the content rather than as a label for it. They are
+      stated once, above the first group, and every later group is the same
+      columns in the same places.
+    * It does not fill alternate rows. The band existed to hold a wrapped
+      description to its own command, and it was a fixed colour from this
+      module's own palette painted into a console that has several themes,
+      where it belonged to none of them. Given the width not to wrap, the
+      descriptions no longer need holding together.
+    * It does not fix its own width. The tables expand into whatever the
+      surface gives them, so the sheet is as wide as the window it is read in
+      rather than a column down the middle of it.
     """
 
-    if command:
-        # One command: the exact names, what it does, and how to type it.
-        detail = render_help(command)
-        return Text(detail)
+    colours = palette or {}
+    accent = colours.get("ACCENT", ACCENT)
+    dim = colours.get("DIM", DIM)
+    dim_bright = colours.get("DIM_BRIGHT", DIM)
+    ink = colours.get("TEXT", TEXT)
+    three_columns = width >= _HELP_THREE_COLUMN_WIDTH
 
-    # Measured over the whole registry, not per group, so every group's second
-    # column starts at the same x and the sheet reads as one table.
-    form_width = max(
-        len(_command_form(command_spec)) for command_spec in COMMAND_REGISTRY.commands
+    # Measured over the whole registry, not per group, so every group's columns
+    # start at the same x and the sheet reads as one table.
+    name_width = max(
+        len(_command_name(command_spec)) for command_spec in COMMAND_REGISTRY.commands
+    )
+    argument_width = max(
+        len(_command_arguments(command_spec))
+        for command_spec in COMMAND_REGISTRY.commands
     )
     sections: list[RenderableType] = []
     for category in CATEGORY_ORDER:
@@ -148,44 +204,101 @@ def build_help_renderable(command: str | None = None) -> RenderableType:
         )
         if not members:
             continue
-        if sections:
+        first = not sections
+        if not first:
             sections.append(Text(""))
         table = Table(
             title=Text(
                 f"{GLYPH_POINT} {_t(category.value)} · {len(members)}",
-                style=f"bold {ACCENT}",
+                style=f"bold {accent}",
             ),
             title_justify="left",
             box=TABLE_BOX,
-            header_style=f"bold {DIM}",
+            header_style=f"bold {dim_bright}",
             expand=True,
+            # The headings belong to the sheet rather than to each group.
+            show_header=first,
             # The blank ruled edges would double the gap the explicit blank line
             # already draws, and two gaps read as an accident rather than a
             # rhythm.
             show_edge=False,
             pad_edge=False,
             padding=(0, 2, 0, 0),
-            # The quiet raised fill, alternating: when a description wraps, the
-            # band tells the eye which command the second line still belongs to.
-            row_styles=("", RAISED_SURFACE),
         )
         # Column headings and the group titles are operator-facing chrome, so
         # they pass through the language layer. The command names and their
         # usage syntax do not: they are the identifiers typed verbatim.
-        table.add_column(
-            _t("Command"), width=form_width, no_wrap=True, style=ACCENT
-        )
-        # The description is the only column that flexes, so the slack the
-        # console has to spare lands there and the form column stays identical
-        # from one group to the next.
-        table.add_column(_t("What it does"), overflow="fold", ratio=1)
-        for command_spec in members:
-            table.add_row(
-                _command_form(command_spec),
-                Text(_t(command_spec.description)),
+        if three_columns:
+            table.add_column(_t("Command"), width=name_width, no_wrap=True, style=accent)
+            # Wide enough for the longest syntax in the registry, so one
+            # group's second column is never a different width from another's.
+            table.add_column(
+                _t("Arguments"), width=argument_width, overflow="fold", style=dim
             )
+        else:
+            # Narrow: the name and its syntax share one column that flexes
+            # rather than two that are fixed. Fixed columns wider than the
+            # window leave the third nothing at all, and Rich then drops it —
+            # a reference sheet with the descriptions missing.
+            table.add_column(
+                _t("Command"), ratio=2, min_width=12, overflow="fold", style=accent
+            )
+        # The description is the column that flexes, so the slack the surface
+        # has to spare lands there and the columns before it stay identical
+        # from one group to the next.
+        table.add_column(
+            _t("What it does"), ratio=3, min_width=12, overflow="fold", style=ink
+        )
+        for command_spec in members:
+            description = Text(_t(command_spec.description))
+            if three_columns:
+                table.add_row(
+                    _command_name(command_spec),
+                    _command_arguments(command_spec),
+                    description,
+                )
+            else:
+                table.add_row(_command_form(command_spec), description)
         sections.append(table)
     return Group(*sections)
+
+
+class _HelpSheet:
+    """The command reference, laid out for the width it is actually given.
+
+    A Rich renderable rather than a finished Group because the layout depends
+    on the room: the console this is shown in is resizable, and a sheet built
+    for one width and drawn at another is the defect this replaced. Built when
+    it is rendered, which is when the width is known, and not once per frame —
+    the surface caches what it drew until something invalidates it.
+    """
+
+    def __init__(self, palette: dict[str, str] | None = None) -> None:
+        self._palette = palette
+
+    def __rich_console__(self, console, options):
+        yield _help_sections(options.max_width, self._palette)
+
+
+def build_help_renderable(
+    command: str | None = None,
+    *,
+    palette: dict[str, str] | None = None,
+) -> RenderableType:
+    """The command reference, or one command's own block.
+
+    ``palette`` lets a caller that owns a theme state the colours the sheet is
+    drawn in; the line console passes nothing and gets this module's own.
+
+    Help for one command stays a short block, since there the reader already
+    knows what they want and only needs its exact form.
+    """
+
+    if command:
+        # One command: the exact names, what it does, and how to type it.
+        detail = render_help(command)
+        return Text(detail)
+    return _HelpSheet(palette)
 
 
 def glyphed_line(glyph: str, glyph_style: str, body: Text) -> RenderableType:

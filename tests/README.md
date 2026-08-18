@@ -22,7 +22,7 @@ a bare `pytest` also works once the package's dependencies are installed
 
 - **core** — evidence source and probing, controlled scratch, configuration and
   backend selection, the tool-result and result-contract formats, result reading,
-  audit hashing, reproducibility, and telemetry egress.
+  run-record hashing, reproducibility, and telemetry egress.
 - **oversight** — policy scope and enforcement over synthetic calls, the argument
   contract gate, call accounting, and module boundaries.
 - **agent** — tool contracts and per-operation argument validation, domain-facade

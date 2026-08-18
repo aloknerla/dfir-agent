@@ -152,6 +152,27 @@ opis predmeta bez dokazne vrijednosti unosi se naredbom `/context`. Dokazi se
 uvijek montiraju samo za čitanje, a otvaranje nove putanje na domaćinu traži
 jedno odobrenje sa strane domaćina prije nego što postane vidljiva konzoli.
 
+### Nadogradnja
+
+`git pull` ne mijenja sliku. Dok se ne izgradi ponovno, konzola pokreće staru:
+
+```bash
+git pull
+dfir-agent --rebuild
+```
+
+`dfir-agent --rebuild` gradi upravo onu sliku koju pokretač poslije pokreće, jer
+Compose poziva s istom compose datotekom i pod istim imenom projekta kao i pri
+pokretanju konzole, pa radi iz bilo kojeg direktorija. `docker compose build
+console` gradi istu sliku samo ako je upisan u direktoriju projekta; drugdje
+imenuje drugi projekt i gradi sliku koju pokretač nikada ne pokreće.
+
+Ako se promijenila i sama skripta pokretača, instalirajte je ponovno naredbom
+`.\install.ps1 -SkipBuild` odnosno `./install.sh --skip-build`. Pokretač
+provjerava oba slučaja prije svakog pokretanja i javlja kada je instalirana
+naredba starija od one u direktoriju projekta ili kada je slika izgrađena prije
+zadnje promjene u repozitoriju.
+
 ## Licencija
 
 Objavljeno pod MIT licencijom. Puni tekst je u [`LICENSE`](LICENSE), a navođenje
@@ -312,6 +333,28 @@ evidence source with `/case`, add a source with `/attach`, and provide a short
 non-evidentiary case brief with `/context`. Evidence is always mounted
 read-only, and opening a new host path requires one host-side approval before it
 becomes visible to the console.
+
+### Updating
+
+A `git pull` does not change the image. Until it is rebuilt, the console keeps
+running the old one:
+
+```bash
+git pull
+dfir-agent --rebuild
+```
+
+`dfir-agent --rebuild` builds the image the launcher then starts, because it
+calls Compose with the same compose file and under the same project name as the
+console run, so it works from any directory. `docker compose build console`
+builds that same image only when it is typed in the project directory; anywhere
+else it names a different project and builds an image the launcher never runs.
+
+If the launcher script itself changed, install it again with
+`.\install.ps1 -SkipBuild` or `./install.sh --skip-build`. The launcher checks
+both cases before every start and reports when the installed command is older
+than the one in the project directory, or when the image was built before the
+newest commit in the repository.
 
 ## License
 

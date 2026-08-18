@@ -196,6 +196,100 @@ def test_shrinking_quickly_after_enlarging_still_narrows_the_header():
     asyncio.run(scenario())
 
 
+def test_maximizing_rescales_the_wordmark_even_when_the_layout_is_slow():
+    """Maximize, then restore, with a settle delay that every layout outruns.
+
+    The defect this pins: the mark used to be re-chosen from a timer a fixed
+    50 ms after the app's OWN resize event, and the check that decided the
+    layout had finished compared that measurement against the previous one. A
+    maximize whose layout took longer than the delay was measured at the pane's
+    old size; that reading agreed with the previous reading, the header
+    concluded it had settled, and it never looked again — so the mark kept the
+    variant chosen for the old width. Clicking maximize is the whole of the
+    interaction, so nothing arrived afterwards to correct it, and the same held
+    for a restore from minimised.
+
+    The delay is set to a millisecond here, which every layout outruns, so this
+    passes only if the mark is chosen from the pane's own laid-out size.
+    """
+
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.3)
+            assert app._header_shown == ("compact", False)
+            narrow = _header_lines(app, app._header_room()[0])
+            assert narrow[0] == _WORDMARK_COMPACT.rows[0]
+
+            # No delay chosen in advance can be right about this; only the pane
+            # itself knows when it has been laid out at the new size.
+            app._HEADER_SETTLE_S = 0.001
+
+            await pilot.resize_terminal(240, 67)  # the maximize button
+            await pilot.pause(0.2)
+            await pilot.pause(0.2)
+            assert app._header_shown == ("full", True)
+            pane = app.query_one("#conversation", VerticalScroll)
+            wide = _header_lines(app, pane.content_size.width)
+            # The full art, laid out for the pane it is now in: drawn from its
+            # left edge rather than at the offset the narrow rendering left,
+            # and inside the pane rather than sliced by it.
+            assert wide[0] == _WORDMARK_FULL.rows[0]
+            assert max(len(line) for line in wide) <= pane.content_size.width
+            assert any(_BANNER_SUBTITLE in line for line in wide)
+
+            await pilot.resize_terminal(120, 40)  # and restore down again
+            await pilot.pause(0.2)
+            await pilot.pause(0.2)
+            assert app._header_shown == ("compact", False)
+            pane = app.query_one("#conversation", VerticalScroll)
+            back = _header_lines(app, pane.content_size.width)
+            assert back[0] == _WORDMARK_COMPACT.rows[0]
+            assert max(len(line) for line in back) <= pane.content_size.width
+            assert not any(_BANNER_SUBTITLE in line for line in back)
+
+    asyncio.run(scenario())
+
+
+def test_a_drag_inside_one_variant_costs_no_repaints():
+    """Following every resize must not mean rendering on every resize.
+
+    A drag emits an event per cell. Each one re-measures the pane and re-runs
+    the cascade, which is a handful of integer comparisons over three fixed
+    renderings; only a width that crosses from one of them into another is
+    allowed to reach the render.
+    """
+
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.4)
+            assert app._header_shown == ("compact", False)
+            painted: list[int] = []
+            banner = app._banner_widget
+            original = banner.update
+            banner.update = lambda *a, **k: (painted.append(1), original(*a, **k))[1]
+            # A drag across widths that all hold the same rendering.
+            for width in (118, 116, 114, 112, 110, 108, 106, 104, 102, 100):
+                await pilot.resize_terminal(width, 40)
+                await pilot.pause(0.01)
+            await pilot.pause(0.2)
+            await pilot.pause(0.2)
+            assert painted == [], (
+                f"{len(painted)} repaints for a drag that never left the "
+                f"compact rendering"
+            )
+            assert app._header_shown == ("compact", False)
+            # The one that does cross a boundary costs exactly one.
+            await pilot.resize_terminal(240, 67)
+            await pilot.pause(0.2)
+            await pilot.pause(0.2)
+            assert len(painted) == 1
+            assert app._header_shown == ("full", True)
+
+    asyncio.run(scenario())
+
+
 def test_a_repeat_measurement_that_changes_nothing_does_not_repaint():
     """The equality check is what keeps a fast drag from stuttering."""
 

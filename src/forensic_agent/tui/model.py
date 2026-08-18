@@ -282,6 +282,37 @@ _PALETTES: Final[dict[str, dict[str, str]]] = {
         "ORANGE_MUTED": "#6f4920",
         "RED_MUTED": "#822626",
     },
+    # Carbon: the console with the colour taken out of its identity. ACCENT is
+    # white, so a command name, a heading and a pane title are white rather
+    # than tinted, and the only colours left on screen are the four that carry
+    # a verdict. It is the theme for reading a command sheet or a long
+    # transcript, where every accent competing for the eye is one more thing to
+    # ignore.
+    #
+    # The greys are neutral to a tenth of a percent of saturation rather than
+    # cooled towards blue, because a white accent on a blue-grey ground reads
+    # as a mistake in the accent rather than as a choice about the ground. The
+    # signal four keep their hues — a verdict is the one thing this theme does
+    # not desaturate — and each is lifted until it clears the floor on the
+    # darkest ground it meets, which on a carbon ground is generous headroom.
+    "dfir-carbon": {
+        "ACCENT": "#fafaff",
+        "PURPLE": "#cfcfe4",
+        "SUCCESS": "#7fd6a4",
+        "ORANGE": "#e2b673",
+        "RED": "#f39a9a",
+        "DIM": "#a3a3a8",
+        "DIM_BRIGHT": "#c2c2c8",
+        "BORDER": "#6f6f78",
+        "PANEL_BG": "#17171a",
+        "PANEL_RAISED": "#26262b",
+        "BACKGROUND": "#121214",
+        "TEXT": "#e8e8ec",
+        "ACCENT_MUTED": "#3d3d45",
+        "SUCCESS_MUTED": "#1f4030",
+        "ORANGE_MUTED": "#453720",
+        "RED_MUTED": "#4a2626",
+    },
 }
 
 #: Colours the stylesheet needs that carry no semantic role: the Textual
@@ -336,6 +367,12 @@ _CHROME: Final[dict[str, dict[str, str]]] = {
         "scrollbar": "#44475a",
         "scrim": "#0e0f13",
     },
+    "dfir-carbon": {
+        "secondary": "#b8b8c4",
+        "footer": "#bcbcc4",
+        "scrollbar": "#3a3a42",
+        "scrim": "#08080a",
+    },
 }
 
 #: The wordmark's gradient, one colour per row of the art. The tokyo tuple is
@@ -353,6 +390,9 @@ _BANNER: Final[dict[str, tuple[str, ...]]] = {
     "dfir-solarized": ("#268bd2", "#278fc6", "#2894bb", "#2898af", "#299da4", "#2aa198"),
     "dfir-mocha": ("#89b4fa", "#96b1f9", "#a3aef9", "#b1acf8", "#bea9f8", "#cba6f7"),
     "dfir-dracula": ("#8be9fd", "#95d8fc", "#9fc7fb", "#a9b5fb", "#b3a4fa", "#bd93f9"),
+    # White to a quiet silver: the mark keeps its shape and gives up its hue,
+    # which is the whole of what this theme is.
+    "dfir-carbon": ("#fafaff", "#ebebf2", "#d8d8e2", "#c5c5d2", "#b2b2c2", "#9f9fb2"),
 }
 
 _active_palette = DEFAULT_PALETTE

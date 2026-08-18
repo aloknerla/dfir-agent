@@ -5,8 +5,8 @@ minutes and then produced a burst of completion lines. The hooks that were meant
 to prevent that were installed and did fire; what they fed was a row rendered
 only when an event arrived, and two of the three long steps of an open report
 exactly once — at their start — and then block. The memory digest blocked inside
-a single read with no callback at all, and the entity index blocks inside a
-scanner subprocess whose output is captured rather than streamed. So the row
+a single read with no callback at all, and the entity index blocked inside a
+scanner subprocess whose output was captured rather than streamed. So the row
 appeared, froze, and was indistinguishable from a hang for precisely the wait it
 existed to explain.
 
@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -187,9 +189,11 @@ def test_the_index_build_paints_a_moving_indicator_while_it_blocks(
 ):
     """The step that reports once and then blocks is the whole complaint.
 
-    ``prewarm_default_scan`` announces itself and then waits inside a scanner
-    subprocess whose output is captured, so no second event is possible. The row
-    must still be visibly alive, and it must say WHICH step is running.
+    A scan that says nothing about how far it has read gives the row no second
+    event to redraw on — a scanner build that prints no progress at all, or the
+    stretch before the first progress line of one that does. The row must still
+    be visibly alive, it must say WHICH step is running, and it must claim no
+    percentage, because nothing here measured one.
     """
 
     def slow_scan(image_path, *, evidence_sha256=None, progress=None):
@@ -224,6 +228,82 @@ def test_the_index_build_paints_a_moving_indicator_while_it_blocks(
     assert len(_distinct(indexing)) > 2
     # Nothing measured this step, so nothing claims to have.
     assert not any("%" in row for row in indexing)
+
+
+#: A scanner that paints its progress in place, as bulk_extractor does: the
+#: percentage it has read, a carriage return and no newline. Run as a real child
+#: process, so what this test drives is the actual subprocess boundary — a
+#: runner that collected the output and handed it over at the exit would show
+#: one percentage, at the end, or none at all.
+_SCANNER_THAT_STATES_ITS_PROGRESS = (
+    "import sys, time\n"
+    "for percent in (12.5, 25.0, 37.5, 50.0, 62.5, 75.0, 87.5, 99.5):\n"
+    "    sys.stdout.write('Offset %dMB (%.2f%%) Done in 0:00:09' % (percent * 21, percent))\n"
+    "    sys.stdout.write(chr(13))\n"
+    "    sys.stdout.flush()\n"
+    "    time.sleep(0.15)\n"
+)
+
+
+def test_the_index_build_shows_the_percentage_the_scanner_measured(
+    tmp_path, monkeypatch
+):
+    """A scanner that says how far it has read must be shown saying it.
+
+    On a two gigabyte memory image the scan is many minutes, and a spinner with
+    a clock beside it is the same silence with a bit of movement in it: it
+    cannot tell an operator whether the wait is nearly over or has barely
+    started. bulk_extractor states its position in every progress line, so the
+    row shows that number and moves it.
+
+    Everything from the child's stdout onwards is the real thing — the
+    streaming runner, the pattern the percentages are read with, the sink the
+    fraction crosses into the app on, and the bar the app draws from it. Only
+    the identity of the binary is stood in for.
+    """
+
+    from forensic_agent.core.toolkit import stream_external
+
+    def scan_that_reports_its_position(image_path, *, evidence_sha256=None, progress=None):
+        assert progress is not None
+        phase = "scanning the whole image with bulk_extractor"
+        progress(None, phase)
+        stream_external(
+            [sys.executable, "-c", _SCANNER_THAT_STATES_ITS_PROGRESS],
+            timeout=60,
+            on_line=_bulk._read_reported_percentage(
+                lambda fraction: progress(fraction, phase)
+            ),
+        )
+        return {"state": "built", "features": ["email"]}
+
+    monkeypatch.setattr(_bulk, "prewarm_default_scan", scan_that_reports_its_position)
+    memory = tmp_path / "memory.raw"
+    memory.write_bytes(b"m" * (1 << 20))
+
+    async def scenario():
+        app, session = _live_app(tmp_path)
+        try:
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.1)
+                rows, screens = await _drive(pilot, app, "case", f"memory {memory}")
+        finally:
+            session.close()
+        return rows, screens
+
+    rows, screens = asyncio.run(scenario())
+
+    indexing = [row for row in rows if "Indexing evidence" in row]
+    assert indexing, "the index build named no step at all"
+    measured = [row for row in indexing if "%" in row]
+    assert measured, f"the scan measured its progress and none of it showed: {_distinct(indexing)}"
+    # It MOVES: one percentage painted once is a bar that never advanced.
+    percentages = {match.group(1) for row in measured if (match := re.search(r"(\d+)%", row))}
+    assert len(percentages) > 1, f"the percentage never advanced: {_distinct(measured)}"
+    # A bar the operator can actually read, on the rendered screen and not
+    # merely inside a widget nobody drew.
+    assert any("█" in row for row in measured)
+    assert any("Indexing evidence" in screen and "%" in screen for screen in screens)
 
 
 def test_hashing_a_memory_image_reports_a_measured_fraction(tmp_path, monkeypatch):

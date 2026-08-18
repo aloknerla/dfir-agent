@@ -155,9 +155,14 @@ def _no_sleep(monkeypatch):
 #: palettes — Nord, Gruvbox, Solarized, Catppuccin Mocha and Dracula, each cited
 #: to its source in model.py, and each held to exactly the same floors as the
 #: three above it rather than shipped at its published values and excused.
+#: dfir-carbon closes the list: the console with the colour taken out of its
+#: identity, so command names and headings render white. It is measured here
+#: exactly like the eight before it — a theme is not shipped because it looks
+#: restrained, it is shipped because it clears the floor.
 SHIPPED: tuple[str, ...] = (
     "dfir-tokyo", "dfir-light", "dfir-contrast",
     "dfir-nord", "dfir-gruvbox", "dfir-solarized", "dfir-mocha", "dfir-dracula",
+    "dfir-carbon",
 )
 
 

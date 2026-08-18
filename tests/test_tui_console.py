@@ -96,8 +96,14 @@ def test_console_app_conversation_and_calm_panes():
             assert len(app.query_one("#grp-1").children) == 6
             app.action_activity()
             await pilot.pause(0.05)
-            # 'a' focuses the newest group title (so Enter folds/unfolds);
-            # either way the focus must land inside the activity pane.
+            # 'a' opens the feed in a drawer, the way 'e' and 'g' open theirs:
+            # the pane is a few rows tall and the feed is read whole here.
+            assert isinstance(app.screen, OverlayScreen)
+            await pilot.press("escape")
+            await pilot.pause(0.05)
+            assert not isinstance(app.screen, OverlayScreen)
+            # And Esc lands back inside the pane, where the arrows browse and
+            # Enter folds a group — the same place 'e' leaves the operator.
             assert app.focused is not None and (
                 app.focused is activity or activity in app.focused.ancestors
             )
@@ -262,6 +268,7 @@ class _FakeSession:
         self.max_steps = 20
         self.max_tool_calls = 20
         self.steps_changed: list[str] = []
+        self.tool_calls_changed: list[str] = []
         self.reasoning_changed: list[str] = []
         self.resumed: list[str] = []
         self.context_set: list[str] = []
@@ -296,6 +303,10 @@ class _FakeSession:
     def change_steps(self, argument):
         self.steps_changed.append(argument)
         self._console.print(f"Steps per message: {argument}")
+
+    def change_tool_calls(self, argument):
+        self.tool_calls_changed.append(argument)
+        self._console.print(f"Tool calls per message: {argument}")
 
     def change_reasoning(self, level):
         self.reasoning_changed.append(level)
@@ -510,22 +521,44 @@ def test_complete_confirms_then_writes_everything_and_closes():
     asyncio.run(scenario())
 
 
-def test_steps_alias_still_reaches_the_effort_command():
-    """Typed /steps 30 keeps working, as an alias, not a command of its own."""
+def test_the_budgets_are_arguments_to_effort_and_not_commands():
+    """One command names the budgets; /steps and /toolcalls are gone.
+
+    They survived for a while as aliases of /effort, which left three ways to
+    type one thing and three names to keep documented. The budgets are still
+    settable — they are arguments — but the command surface is one command.
+    """
 
     from forensic_agent.cli.commands import COMMAND_REGISTRY
 
-    assert COMMAND_REGISTRY.resolve("steps").name == "effort"
-    assert COMMAND_REGISTRY.resolve("toolcalls").name == "effort"
-    # The two commands this one replaced are gone, not hidden behind aliases.
+    assert COMMAND_REGISTRY.resolve("effort").name == "effort"
+    assert COMMAND_REGISTRY.resolve("steps") is None
+    assert COMMAND_REGISTRY.resolve("toolcalls") is None
+    # The two commands /effort replaced are gone, and stayed gone.
     assert COMMAND_REGISTRY.resolve("budget") is None
     assert COMMAND_REGISTRY.resolve("reasoning") is None
+    assert "steps" not in COMMAND_REGISTRY.resolve("effort").aliases
+    assert "toolcalls" not in COMMAND_REGISTRY.resolve("effort").aliases
 
     async def scenario():
         app = build_app(_FakeLiveController())
         async with app.run_test(size=(120, 40)) as pilot:
+            # The budgets still apply, through the one command that names them.
+            app._handle_slash("/effort steps 30")
+            await pilot.pause(0.1)
+            assert app._controller.session.steps_changed == ["30"]
+            app._handle_slash("/effort toolcalls 12")
+            await pilot.pause(0.1)
+            assert app._controller.session.tool_calls_changed == ["12"]
+            # And the removed spellings are refused as what they now are.
+            notices: list[str] = []
+            app.notify = lambda message, **kw: notices.append(str(message))
             app._handle_slash("/steps 30")
             await pilot.pause(0.1)
+            app._handle_slash("/toolcalls 30")
+            await pilot.pause(0.1)
+            assert len(notices) == 2
+            assert all("Unknown command" in notice for notice in notices)
             assert app._controller.session.steps_changed == ["30"]
 
     asyncio.run(scenario())
