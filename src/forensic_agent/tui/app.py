@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import io
 import re
+import threading
 from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -2472,6 +2473,14 @@ class InvestigationApp(App):
         # that thread is still inside session.ask(); a second ask() on the
         # same session while it runs would race the session's own state.
         self._ask_thread_alive = False
+        #: Held for as long as a question is inside session.ask(). A cancelled
+        #: run keeps it until its thread unwinds, so the next question waits
+        #: here rather than being refused at the prompt.
+        self._ask_gate = threading.Lock()
+        #: How many external tools the last cancel had to stop. Read by the
+        #: cancelled line, which says so rather than leaving the operator to
+        #: wonder whether a scan is still running somewhere.
+        self._cancelled_children = 0
         #: Commands taken while a message was in flight, waiting for it to end.
         self._deferred_commands: list[tuple[str, str]] = []
         self._deferred_drain_queued = False
@@ -6423,15 +6432,15 @@ class InvestigationApp(App):
     def _ask(self, question: str) -> None:
         if self.running:
             return
-        if self._ask_thread_alive:
-            # Ctrl+C orphaned a run whose thread has not returned yet; a second
-            # ask() would race it inside the same session.
-            self.notify(
-                "The cancelled run is still winding down. Try again in a moment.",
-                title="busy",
-                severity="warning",
-            )
-            return
+        # A cancelled run whose thread has not returned yet does NOT cost the
+        # operator their next question. It used to: a second ask() would race
+        # the first inside one session, so the console refused and told them to
+        # try again in a moment, which is the console asking the operator to
+        # poll it. The race is real and is answered where it lives — the worker
+        # below takes the session's gate before entering ask(), so the second
+        # question starts the moment the first thread is out of it. Cancelling
+        # now stops that thread at its next dispatch, so the wait is the tail of
+        # one call rather than the rest of an investigation.
         if self._case_op_alive and not self._controller.is_demo:
             self.notify(
                 "A case operation is still in progress. Give it a moment.",
@@ -6458,41 +6467,91 @@ class InvestigationApp(App):
         self._begin_run_panes()
         self._investigate(question, self._run_token)
 
+    #: How long a new question waits for a cancelled one to leave the session.
+    #: A cancelled run stops at its next dispatch, so what is being waited for
+    #: is the tail of one call and the unwinding after it. Generous enough to
+    #: cover a slow tool that was already killed and is being reaped, short
+    #: enough that a run which somehow never leaves is reported rather than
+    #: leaving the operator with a console that says nothing.
+    _ASK_GATE_WAIT_S = 30.0
+
     @work(thread=True, exclusive=True, group="investigate")
     def _investigate(self, question: str, token: int) -> None:
         def on_tool(event: ToolEvent) -> None:
             if token == self._run_token:
                 self.call_from_thread(self._apply_tool_event, event)
 
-        self._ask_thread_alive = True
-        try:
-            result = self._controller.run(question, on_tool)
-        except Exception as exc:  # a worker crash must not take down the UI
+        # One question inside session.ask() at a time. The session carries the
+        # history, the last run and the record paths for the question it is
+        # answering, and two threads inside it would interleave all three. The
+        # gate is what lets the prompt accept a question the moment it is typed
+        # while still guaranteeing that.
+        if not self._ask_gate.acquire(timeout=self._ASK_GATE_WAIT_S):
             if token == self._run_token:
-                self.call_from_thread(self._render_run_fault, exc)
+                self.call_from_thread(
+                    self._render_error,
+                    "The previous run has not let go of the session. Nothing "
+                    "was asked, and nothing was changed.",
+                )
             return
+        try:
+            self._ask_thread_alive = True
+            try:
+                result = self._controller.run(question, on_tool)
+            except Exception as exc:  # a worker crash must not take down the UI
+                if token == self._run_token:
+                    self.call_from_thread(self._render_run_fault, exc)
+                return
+            finally:
+                self._ask_thread_alive = False
         finally:
-            self._ask_thread_alive = False
+            self._ask_gate.release()
         if token == self._run_token:
             self.call_from_thread(self._render_result, result)
 
     def action_interrupt(self) -> None:
-        """Ctrl+C cancels the message in flight; it never quits the console.
+        """Ctrl+C stops the message in flight; it never quits the console.
 
-        A cancelled run's late result is orphaned by the token bump — the
-        worker thread finishes on its own, and everything it reports is
-        ignored. With nothing in flight, Ctrl+C clears a half-typed
-        question; on an empty prompt it arms quit like ``q``.
+        Three things have to happen, and the run's own thread cannot be one of
+        them — a thread worker cannot be interrupted from outside.
+
+        The run is told to stop dispatching. Every execution cell is asked, and
+        the cell refuses the next model request or tool call it is asked to
+        make, which is the same check it already makes for a budget that ran
+        out. So the run stops at the next boundary rather than working on to
+        its natural end with nobody waiting for it.
+
+        Anything already running is killed. A packet scan carries a three-minute
+        ceiling and a memory scan far more, and one left to finish reads the
+        evidence at full speed for as long as it takes with the answer going
+        nowhere.
+
+        The late result is discarded. The token bump orphans it: the worker
+        checks the token before reporting, so whatever the cancelled run
+        eventually returns is never published.
+
+        With nothing in flight, Ctrl+C clears a half-typed question; on an empty
+        prompt it arms quit like ``q``.
         """
 
         if self.running:
+            from forensic_agent.agent.execution_budget import cancel_active_cells
+            from forensic_agent.core.toolkit import terminate_live_children
+
             self._run_token += 1
             self.workers.cancel_group(self, "investigate")
+            # Stop dispatching first, then kill what is already dispatched. The
+            # other order leaves a window in which the run answers the killed
+            # tool by starting the next one.
+            cancel_active_cells()
+            self._cancelled_children = terminate_live_children()
             self.running = False
             self._remove_working_line()
             self._say(self._cancelled_line)
             self._end_exchange()
-            self.query_one("#prompt", Input).focus()
+            prompt = self.query_one("#prompt", Input)
+            prompt.disabled = False
+            prompt.focus()
             return
         prompt = self.query_one("#prompt", Input)
         if prompt.value:
@@ -6501,11 +6560,33 @@ class InvestigationApp(App):
         self.action_quit()
 
     def _cancelled_line(self) -> Text:
-        return Text(
-            f"{M.GLYPH_ERROR} cancelled. Nothing is shown here, but the "
-            "interrupted run may still finish and be saved",
-            style=M.ORANGE,
+        """What the cancel did, and what the run had already put on the record.
+
+        It used to say the run "may still finish and be saved", which was true
+        and unhelpful: the operator was told the thing they had just stopped
+        might not have stopped. It stops now, so this says what happened and
+        what survives — the calls it had already made are on the record, under
+        their own run, and the answer it never reached is not.
+        """
+
+        calls = len(self._activity_log)
+        killed = getattr(self, "_cancelled_children", 0)
+        line = Text()
+        line.append(f"{M.GLYPH_ERROR} cancelled", style=f"bold {M.ORANGE}")
+        if calls:
+            line.append(
+                f" after {calls} tool call{'' if calls == 1 else 's'}",
+                style=M.ORANGE,
+            )
+        if killed:
+            line.append(
+                f", {killed} still running and stopped", style=M.ORANGE
+            )
+        line.append(
+            ". What it had already recorded is kept; no answer was published.",
+            style=M.DIM_BRIGHT,
         )
+        return line
 
     # -- live activity ---------------------------------------------------
     def _apply_tool_event(self, event: ToolEvent) -> None:

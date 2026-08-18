@@ -2267,3 +2267,110 @@ def test_an_argument_refusal_leads_and_says_why_in_plain_words():
     assert "1 refused" in subtitle and "1 guessed" in subtitle
     # What the run actually exercised, which differs by evidence type.
     assert any("spawn process" in line for line in lines), lines
+
+
+# ---------------------------------------------------------------------------
+# Ctrl+C stops the run, and the next question does not have to wait for it
+# ---------------------------------------------------------------------------
+def test_cancel_then_ask_is_accepted_immediately():
+    """The refusal this replaced asked the operator to poll the console.
+
+    Ctrl+C used to leave the run's thread inside session.ask(), and the next
+    question was refused with "the cancelled run is still winding down, try
+    again in a moment". The race behind that refusal is real, so it is answered
+    where it lives: the prompt takes the question at once and the worker waits
+    for the session rather than the operator waiting for the console.
+    """
+
+    import threading
+
+    released = threading.Event()
+    entered = threading.Event()
+
+    class _SlowController(_FakeLiveController):
+        def run(self, question, on_tool):
+            entered.set()
+            # Stands in for a run that has been told to stop and is unwinding.
+            released.wait(timeout=30)
+            raise AssertionError("the cancelled run must never publish a result")
+
+    async def scenario():
+        app = build_app(_SlowController())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.2)
+            prompt = app.query_one("#prompt")
+            prompt.value = "which USB device was connected?"
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if entered.is_set():
+                    break
+            assert entered.is_set(), "the run never started"
+            assert app.running
+
+            app.action_interrupt()
+            await pilot.pause(0.2)
+            # The console is free at once, whatever the orphaned thread is doing.
+            assert app.running is False
+            assert app._ask_thread_alive is True, (
+                "this test is meaningless unless the old thread is still inside ask()"
+            )
+            assert prompt.disabled is False
+
+            # And the transcript says what happened rather than that it might
+            # still be happening.
+            said = _rendered_text(app)
+            assert "cancelled" in said
+
+            # A second question is ACCEPTED now — not refused with "try again".
+            notices: list[str] = []
+            app.notify = lambda message, **kw: notices.append(str(message))
+            prompt.value = "and which user was logged in?"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert not any("winding down" in note for note in notices), notices
+            assert app.running is True, "the second question was not accepted"
+
+            released.set()
+            await pilot.pause(0.3)
+
+    asyncio.run(scenario())
+
+
+def _rendered_text(app) -> str:
+    """Everything the conversation is currently showing, as plain text."""
+
+    import io
+
+    from rich.console import Console as RichConsole
+
+    lines: list[str] = []
+    for widget in app.query("#conversation Static").results(Static):
+        rendered = widget.render()
+        rendered = getattr(rendered, "_renderable", rendered)
+        console = RichConsole(width=100, record=True, file=io.StringIO())
+        console.print(rendered)
+        lines.append(console.export_text())
+    return chr(10).join(lines)
+
+
+def test_each_run_writes_its_own_hash_chain_so_a_cancel_cannot_corrupt_one():
+    """Why a cancelled run and the next question cannot break the chain.
+
+    The chain is the system's integrity claim, so "they happen not to overlap"
+    would not be good enough. They cannot overlap: every run is given its own
+    directory, created with mkdir() that fails if it already exists, and its own
+    oversight.jsonl inside it. Two runs therefore write two chains, each from
+    its own genesis, and a late append from a cancelled run lands in the record
+    of the run that made it.
+    """
+
+    import inspect
+
+    from forensic_agent.cli import controlled
+
+    source = inspect.getsource(controlled.ControlledInvestigationSession.ask)
+    # One directory per run, and a creation that refuses to reuse one.
+    assert "run_dir = self.output_root / run_id" in source
+    assert "run_dir.mkdir(mode=0o700)" in source
+    assert 'oversight_path = run_dir / "oversight.jsonl"' in source

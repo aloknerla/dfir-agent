@@ -150,3 +150,124 @@ def test_the_time_budget_reaches_the_next_question_the_way_the_others_do(
         max_wall_time_s=600,
     )
     assert built.max_wall_time_s == 600.0
+
+
+# ---------------------------------------------------------------------------
+# cancellation is not a ceiling, and must never be counted as one
+# ---------------------------------------------------------------------------
+def _a_cell(**overrides):
+    import time as _time
+
+    from forensic_agent.agent.execution_budget import _CellExecutionBudget
+
+    now = _time.monotonic()
+    fields = {
+        "started_monotonic": now,
+        "deadline_monotonic": now + 900.0,
+        "max_investigation_requests": 20,
+        "max_model_requests": 24,
+        "max_tool_calls": 20,
+    }
+    fields.update(overrides)
+    return _CellExecutionBudget(**fields)
+
+
+def test_a_cancelled_run_is_not_recorded_as_budget_exhaustion():
+    """The distinction the whole reason exists for.
+
+    Cancellation is delivered by refusing the next dispatch, which is also how
+    a spent time budget is delivered. Filing it under max_wall_time_s would be
+    the obvious shortcut and would put every Ctrl+C into the bucket a later
+    evaluation counts when it asks how often a model exhausts its budget.
+    """
+
+    from forensic_agent.agent.execution_budget import (
+        BUDGET_EXHAUSTION_REASONS,
+        CANCELLED_REASON,
+        _DispatchDenied,
+    )
+
+    assert CANCELLED_REASON not in BUDGET_EXHAUSTION_REASONS
+
+    cell = _a_cell()
+    assert cell.remaining() > 0
+    cell.cancel()
+
+    with pytest.raises(_DispatchDenied) as denial:
+        cell.remaining()
+    assert denial.value.reason == CANCELLED_REASON
+
+    metrics = cell.metrics()
+    assert metrics["cancelled"] is True
+    # The ceiling vocabulary is untouched: no reason was reached.
+    assert metrics["exhaustion_reasons"] == []
+    assert metrics["deadline_exhausted"] is False
+
+
+def test_cancellation_is_reported_even_in_the_last_second_of_the_budget():
+    """A run cancelled as its clock runs out is cancelled, not timed out."""
+
+    import time as _time
+
+    from forensic_agent.agent.execution_budget import CANCELLED_REASON, _DispatchDenied
+
+    now = _time.monotonic()
+    cell = _a_cell(started_monotonic=now - 899.99, deadline_monotonic=now + 0.01)
+    cell.cancel()
+    with pytest.raises(_DispatchDenied) as denial:
+        cell.remaining()
+    assert denial.value.reason == CANCELLED_REASON
+    assert cell.metrics()["exhaustion_reasons"] == []
+
+
+def test_a_cancel_reaches_a_cell_started_on_another_thread():
+    """The console cancels from the UI thread; the cell was built on the run's."""
+
+    import threading
+
+    from forensic_agent.agent.execution_budget import (
+        _DispatchDenied,
+        cancel_active_cells,
+    )
+
+    built: dict[str, object] = {}
+    ready = threading.Event()
+
+    def build_on_another_thread() -> None:
+        built["cell"] = _a_cell()
+        ready.set()
+
+    worker = threading.Thread(target=build_on_another_thread)
+    worker.start()
+    assert ready.wait(timeout=10)
+    worker.join(timeout=10)
+
+    cell = built["cell"]
+    assert cell.remaining() > 0  # type: ignore[union-attr]
+    assert cancel_active_cells() >= 1
+    with pytest.raises(_DispatchDenied):
+        cell.remaining()  # type: ignore[union-attr]
+
+
+def test_a_cancelled_run_does_not_finish_under_the_budget_exhausted_prefix():
+    """The record's own word for it, checked where the record is written.
+
+    The run state carries one field for "why did dispatch stop", and every
+    value it can hold except this one is a ceiling, so the finish reason is
+    built by prefixing it with budget_exhausted:. A cancellation travelling
+    that path would be filed as budget_exhausted:cancelled, which reads as a
+    budget the run exhausted to anyone grepping the prefix.
+    """
+
+    import inspect
+
+    from forensic_agent.agent.execution_budget import CANCELLED_REASON
+    from forensic_agent.agent.orchestration import finalization
+
+    source = inspect.getsource(finalization)
+    assert "CANCELLED_REASON" in source, (
+        "the finish reason no longer distinguishes a cancellation"
+    )
+    # The prefixed form must be reachable only when the reason is NOT this one.
+    assert 'f"budget_exhausted:{state.dispatch_exhaustion_reason}"' in source
+    assert CANCELLED_REASON == "cancelled"

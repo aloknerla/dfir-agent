@@ -9,6 +9,7 @@ import time
 import pytest
 
 from forensic_agent.core.toolkit import (
+    _LIVE_CHILDREN,
     ExternalToolError,
     cell_deadline,
     run_external,
@@ -22,8 +23,53 @@ class _Proc:
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
+class _FakePopen:
+    """A child that never existed, standing in at the boundary run_external owns.
+
+    These tests intercept ``subprocess.Popen`` rather than ``subprocess.run``
+    because that is where the runner now starts its child: it needs the handle,
+    so that a run cancelled while a scan is still reading can kill it instead of
+    waiting the scan out. What is asserted is unchanged — the argv list, the
+    working directory, the scrubbed environment, and the failure contract on a
+    non-zero exit or a timeout.
+    """
+
+    def __init__(self, returncode=0, stdout="", stderr="", expires=False):
+        self.returncode = returncode
+        self._stdout, self._stderr = stdout, stderr
+        self._expires = expires
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        # Expires once, exactly as a real child does: the runner kills it and
+        # drains it with a second, untimed communicate(), which returns. A fake
+        # that raised again would be asserting behaviour Popen does not have.
+        if self._expires and timeout is not None:
+            self._expires = False
+            raise subprocess.TimeoutExpired(cmd="tool", timeout=timeout)
+        return self._stdout, self._stderr
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+
+
+def _popen_factory(seen=None, **outcome):
+    """A ``subprocess.Popen`` stand-in that records how it was called."""
+
+    def factory(cmd, **kwargs):
+        if seen is not None:
+            seen.update(kwargs)
+            seen["cmd"] = cmd
+        return _FakePopen(**outcome)
+
+    return factory
+
+
 def test_run_external_success_returns_completed_process(monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(returncode=0, stdout="ok"))
+    monkeypatch.setattr(subprocess, "Popen", _popen_factory(returncode=0, stdout="ok"))
     proc = run_external(["tool", "-x"], timeout=5)
     assert proc.returncode == 0 and proc.stdout == "ok"
 
@@ -45,31 +91,28 @@ def test_run_external_replaces_invalid_utf8_and_preserves_binary_output():
 
 
 def test_run_external_nonzero_raises_with_rc_and_stderr(monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(returncode=2, stderr="boom"))
+    monkeypatch.setattr(subprocess, "Popen", _popen_factory(returncode=2, stderr="boom"))
     with pytest.raises(ExternalToolError) as ei:
         run_external(["tool"], timeout=5)
     assert ei.value.returncode == 2 and "boom" in ei.value.stderr and "tool" in str(ei.value)
 
 
 def test_run_external_timeout_raises(monkeypatch):
-    def _boom(*a, **k):
-        raise subprocess.TimeoutExpired(cmd="tool", timeout=5)
-
-    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(subprocess, "Popen", _popen_factory(expires=True))
     with pytest.raises(ExternalToolError) as ei:
         run_external(["tool"], timeout=5)
     assert "tim" in str(ei.value).lower()
 
 
 def test_run_external_check_false_returns_nonzero(monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(returncode=1, stdout="partial"))
+    monkeypatch.setattr(subprocess, "Popen", _popen_factory(returncode=1, stdout="partial"))
     proc = run_external(["carver"], timeout=5, check=False)  # caller inspects rc itself
     assert proc.returncode == 1 and proc.stdout == "partial"
 
 
 def test_run_external_forwards_cwd(monkeypatch):
     seen = {}
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: seen.update(k) or _Proc(returncode=0))
+    monkeypatch.setattr(subprocess, "Popen", _popen_factory(seen))
     run_external(["tool"], timeout=5, cwd="/work")
     assert seen.get("cwd") == "/work"
 
@@ -84,7 +127,7 @@ def test_run_external_preserves_runtime_environment_but_scrubs_credentials(monke
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "must-not-reach-parser")
     monkeypatch.setenv("HTTPS_PROXY", "http://credentialed-proxy.invalid")
     monkeypatch.setenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: seen.update(k) or _Proc())
+    monkeypatch.setattr(subprocess, "Popen", _popen_factory(seen))
 
     run_external(["tool"], timeout=5)
 
@@ -274,3 +317,64 @@ def test_stream_external_forwards_cwd(tmp_path):
         cwd=str(tmp_path),
     )
     assert seen and os.path.realpath(seen[0]) == os.path.realpath(str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# cancellation: nothing keeps reading the evidence after Ctrl+C
+# ---------------------------------------------------------------------------
+def test_a_running_tool_is_killed_by_a_cancel_from_another_thread():
+    """The behaviour this exists for, measured rather than asserted in prose.
+
+    A packet scan carries a three-minute ceiling and a memory scan far more. A
+    cancelled run that left one running would go on reading the evidence at
+    full speed with nobody waiting for the answer; that is how a container came
+    to hold most of a CPU for ten hours.
+    """
+
+    import threading
+
+    from forensic_agent.core.toolkit import (
+        EXTERNAL_TOOL_CANCELLED,
+        terminate_live_children,
+    )
+
+    outcome: dict[str, object] = {}
+    started = threading.Event()
+
+    def run_a_long_tool() -> None:
+        started.set()
+        began = time.monotonic()
+        try:
+            run_external([sys.executable, "-c", "import time; time.sleep(60)"], timeout=120)
+            outcome["result"] = "returned on its own"
+        except ExternalToolError as error:
+            outcome["result"] = str(error)
+        outcome["seconds"] = time.monotonic() - began
+
+    worker = threading.Thread(target=run_a_long_tool)
+    worker.start()
+    assert started.wait(timeout=10)
+    # Give the child a moment to actually exist before asking for it to die.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not _LIVE_CHILDREN:
+        time.sleep(0.05)
+    assert _LIVE_CHILDREN, "the child was never registered, so a cancel cannot reach it"
+
+    killed = terminate_live_children()
+    worker.join(timeout=30)
+
+    assert killed == 1
+    assert not worker.is_alive()
+    # It did not wait out the tool's own sixty seconds.
+    assert float(outcome["seconds"]) < 20, outcome
+    # And it is reported as stopped, not as a tool that failed: a cancelled run
+    # must not leave a spurious tool failure on the record.
+    assert EXTERNAL_TOOL_CANCELLED in str(outcome["result"]), outcome
+    # The registry is left clean, so the next cancel has nothing stale to kill.
+    assert not _LIVE_CHILDREN
+
+
+def test_terminating_when_nothing_runs_is_a_no_op():
+    from forensic_agent.core.toolkit import terminate_live_children
+
+    assert terminate_live_children() == 0

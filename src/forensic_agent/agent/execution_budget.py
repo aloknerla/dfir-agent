@@ -5,8 +5,9 @@ from __future__ import annotations
 import math
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Final, Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,52 @@ BUDGET_EXHAUSTION_REASONS: frozenset[str] = frozenset(
         "max_wall_time_s",
     }
 )
+
+#: Why a run stopped when nobody's ceiling was reached: the operator asked it to.
+#:
+#: Deliberately OUTSIDE :data:`BUDGET_EXHAUSTION_REASONS`, and that is the whole
+#: point of it existing. A cancellation is not a resource this run ran out of.
+#: Filing it as ``max_wall_time_s`` — the obvious shortcut, since collapsing the
+#: deadline is how the stop is delivered — would put every Ctrl+C into the same
+#: bucket as a genuine time budget expiry, and anyone later counting how often
+#: models exhaust their budget would be counting the operator's keystrokes as
+#: model failures. The consumers in cli/controlled.py filter both the
+#: ``exhaustion_reasons`` list and the ``examination_bound`` against the frozen
+#: set above, so keeping this out of it is what keeps a cancelled run out of the
+#: exhaustion statistics.
+CANCELLED_REASON: Final[str] = "cancelled"
+
+#: Every cell currently able to dispatch work, so a cancel can reach one from
+#: the thread that did not start it.
+#:
+#: A cell is created deep inside run preparation, on the run's own thread, and
+#: the console that has to cancel it runs on another. Weak references, so a
+#: finished run's cell leaves this set by being collected rather than by
+#: remembering to deregister on every path out of a run, including the ones that
+#: raise.
+_ACTIVE_CELLS: weakref.WeakSet[_CellExecutionBudget] = weakref.WeakSet()
+_ACTIVE_CELLS_LOCK = threading.Lock()
+
+
+def cancel_active_cells() -> int:
+    """Ask every cell now running to stop at its next dispatch, and say how many.
+
+    Every cell rather than one named cell: the console investigates one question
+    at a time (its worker is exclusive), so "the run in flight" and "every cell
+    that exists" are the same set, and asking for a handle to thread down
+    through preparation would buy nothing this does not already give.
+
+    The cells are only ASKED. Nothing is interrupted here, because nothing can
+    be: the stop is delivered by the check every dispatch already makes, which
+    is why a cancelled run unwinds down the path the codebase already has for a
+    budget that ran out rather than down a new one written for this.
+    """
+
+    with _ACTIVE_CELLS_LOCK:
+        cells = list(_ACTIVE_CELLS)
+    for cell in cells:
+        cell.cancel()
+    return len(cells)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +218,14 @@ class _CellExecutionBudget:
         self._tool_rejections = 0
         self._deadline_exhausted = False
         self._exhaustion_reasons: set[str] = set()
+        #: Asked to stop by the operator. Written by another thread and read
+        #: under this cell's lock; a bool assignment is atomic, so the cancel
+        #: path never takes the lock and can never deadlock against a dispatch
+        #: that is holding it.
+        self._cancelled = False
+        #: Whether a dispatch was actually refused because of that, which is
+        #: what the record should say happened.
+        self._cancellation_observed = False
         # Model calls that were never dispatched but whose call ID had to be
         # closed with a control record so no unresolved call survives the run.
         self._control_closed_calls = 0
@@ -198,6 +253,17 @@ class _CellExecutionBudget:
         self._navigation_dispatches = 0
         self._navigation_rejections = 0
         self._navigation_attempts: dict[int, dict[str, object]] = {}
+        with _ACTIVE_CELLS_LOCK:
+            _ACTIVE_CELLS.add(self)
+
+    def cancel(self) -> None:
+        """Stop dispatching. Safe to call from any thread, and idempotent."""
+
+        self._cancelled = True
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
 
     def now(self) -> float:
         return float(self._clock())
@@ -206,6 +272,13 @@ class _CellExecutionBudget:
         return max(0.0, self.now() - self.started_monotonic)
 
     def _remaining_locked(self) -> tuple[float, float]:
+        # Cancellation is tested BEFORE the clock, so a run cancelled in its
+        # last second is recorded as cancelled rather than as having run out of
+        # time. It records nothing in _exhaustion_reasons: no ceiling was
+        # reached, and the exhaustion statistics must not learn about this.
+        if self._cancelled:
+            self._cancellation_observed = True
+            raise _DispatchDenied(CANCELLED_REASON)
         now = self.now()
         remaining = self.deadline_monotonic - now
         if remaining <= 0:
@@ -537,6 +610,9 @@ class _CellExecutionBudget:
                 raise RuntimeError("completed tool dispatch ordinals are not contiguous")
             return {
                 "schema_id": "forensic.cell-execution-metrics.v1",
+                # Its own field, never an entry in exhaustion_reasons, so a
+                # reader counting exhausted budgets cannot count this.
+                "cancelled": self._cancellation_observed,
                 "absolute_dispatch_deadline_enforced": True,
                 "hard_wall_kill_enforced": False,
                 "quiescent_cleanup_may_exceed_deadline": True,

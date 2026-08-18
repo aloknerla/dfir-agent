@@ -140,6 +140,67 @@ def effective_external_timeout(timeout: float) -> float | None:
     return min(float(timeout), remaining)
 
 
+#: Every external tool this process has started and not yet reaped.
+#:
+#: A cancelled run must not leave one running. The tools here are not quick:
+#: a packet scan carries a three-minute ceiling and a memory scan far more, and
+#: an abandoned one goes on reading the evidence at full speed with nobody left
+#: to receive the result. Leaving one to finish in the background is how a
+#: container ended up holding most of a CPU for ten hours.
+_LIVE_CHILDREN: set[subprocess.Popen] = set()
+_LIVE_CHILDREN_LOCK = threading.Lock()
+
+
+@contextmanager
+def _tracked_child(proc: subprocess.Popen):
+    """Hold a started child in the registry for exactly as long as it runs."""
+
+    with _LIVE_CHILDREN_LOCK:
+        _LIVE_CHILDREN.add(proc)
+    try:
+        yield proc
+    finally:
+        with _LIVE_CHILDREN_LOCK:
+            _LIVE_CHILDREN.discard(proc)
+
+
+def terminate_live_children() -> int:
+    """Kill every external tool still running, and say how many there were.
+
+    Kill rather than terminate: these are read-only forensic binaries with
+    nothing to flush and no state to lose, and a scan that ignores SIGTERM
+    while it finishes reading a 2 GB image is the case this exists for. The
+    thread that started each one is still inside its own wait and reaps it
+    there, so nothing is left as a zombie.
+
+    Safe from any thread, and safe to call when nothing is running.
+    """
+
+    with _LIVE_CHILDREN_LOCK:
+        children = list(_LIVE_CHILDREN)
+    killed = 0
+    for proc in children:
+        if proc.poll() is not None:
+            continue
+        try:
+            # Marked before the kill, so the thread waiting on it can tell a
+            # tool that was stopped from a tool that failed. Without this a
+            # cancelled run files a spurious tool failure on its record, and a
+            # record of tool failures is one of the things this system exists
+            # to produce honestly.
+            proc._dfa_cancelled = True  # type: ignore[attr-defined]
+            proc.kill()
+            killed += 1
+        except Exception:
+            # Already gone between the poll and the kill is the outcome wanted.
+            pass
+    return killed
+
+
+#: What a tool reports when the operator stopped it rather than when it failed.
+EXTERNAL_TOOL_CANCELLED = "stopped because the run was cancelled"
+
+
 def _admit_external(cmd, timeout) -> tuple[str, float]:
     """Name the tool and settle how long it really has, or refuse to start it.
 
@@ -181,34 +242,56 @@ def run_external(
     ``timeout`` is a ceiling. When an execution cell is active, the effective
     timeout is the smaller of that ceiling and the cell's remaining time."""
     tool, effective = _admit_external(cmd, timeout)
-    proc: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]
-    try:
-        if text:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=effective,
-                cwd=cwd,
-                env=_sanitized_child_environment(env),
-            )
-        else:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=False,
-                timeout=effective,
-                cwd=cwd,
-                env=_sanitized_child_environment(env),
-            )
-    except subprocess.TimeoutExpired as e:
-        raise ExternalToolError(tool, None, f"timed out after {effective:.0f}s") from e
-    if check and proc.returncode != 0:
-        stderr = proc.stderr if isinstance(proc.stderr, str) else ""
-        raise ExternalToolError(tool, proc.returncode, stderr)
-    return proc
+    # subprocess.run() with a timeout is exactly this, and was exactly this
+    # until a cancelled run had to be able to reach the child: run() owns its
+    # Popen and hands it to nobody, so there was no way to kill a scan that a
+    # cancelled run had already started. The pieces below are run()'s own --
+    # the same argv list and no shell, the same sanitized environment, the same
+    # communicate(timeout=...) and the same kill-then-drain on expiry -- with
+    # the child registered while it lives so a cancel can find it.
+    child_environment = _sanitized_child_environment(env)
+    proc: subprocess.Popen
+    if text:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+            env=child_environment,
+        )
+    else:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            cwd=cwd,
+            env=child_environment,
+        )
+    with _tracked_child(proc):
+        try:
+            stdout, stderr_output = proc.communicate(timeout=effective)
+        except subprocess.TimeoutExpired as e:
+            proc.kill()
+            proc.communicate()
+            raise ExternalToolError(
+                tool, None, f"timed out after {effective:.0f}s"
+            ) from e
+    if getattr(proc, "_dfa_cancelled", False):
+        raise ExternalToolError(tool, proc.returncode, EXTERNAL_TOOL_CANCELLED)
+    completed: subprocess.CompletedProcess = subprocess.CompletedProcess(
+        args=cmd,
+        returncode=proc.returncode,
+        stdout=stdout,
+        stderr=stderr_output,
+    )
+    if check and completed.returncode != 0:
+        stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+        raise ExternalToolError(tool, completed.returncode, stderr)
+    return completed
 
 
 #: How much of a streamed tool's output is kept for its failure message. The
@@ -297,6 +380,8 @@ def stream_external(
     watchdog.daemon = True
     watchdog.start()
     tail: deque[str] = deque(maxlen=_STREAM_TAIL_LINES)
+    with _LIVE_CHILDREN_LOCK:
+        _LIVE_CHILDREN.add(proc)
     try:
         stream = proc.stdout
         if stream is not None:
@@ -313,6 +398,8 @@ def stream_external(
         proc.wait()
     finally:
         watchdog.cancel()
+        with _LIVE_CHILDREN_LOCK:
+            _LIVE_CHILDREN.discard(proc)
         if proc.poll() is None:
             # The loop left early (the caller was interrupted, or the read
             # failed). Kill and drain rather than leak a scanner that would
@@ -324,6 +411,8 @@ def stream_external(
             proc.wait()
         if proc.stdout is not None:
             proc.stdout.close()
+    if getattr(proc, "_dfa_cancelled", False):
+        raise ExternalToolError(tool, proc.returncode, EXTERNAL_TOOL_CANCELLED)
     if expired.is_set():
         raise ExternalToolError(tool, None, f"timed out after {effective:.0f}s")
     if check and proc.returncode != 0:

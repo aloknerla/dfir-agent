@@ -8,7 +8,11 @@ from typing import TypeGuard
 
 from forensic_agent.agent.answer_format import reject_internal_model_output
 from forensic_agent.agent.evidence_regions import unread_regions
-from forensic_agent.agent.execution_budget import _DispatchDenied, _DispatchPermit
+from forensic_agent.agent.execution_budget import (
+    CANCELLED_REASON,
+    _DispatchDenied,
+    _DispatchPermit,
+)
 from forensic_agent.agent.execution_dispatch import _final_ai_text
 from forensic_agent.agent.identifier_grounding import check_identifier_grounding
 from forensic_agent.agent.orchestration.state import (
@@ -1481,7 +1485,15 @@ def _finalize_runtime(runtime: PreparedRuntime, state: InvestigationState) -> No
                 "recursion_limit_hit": state.recursion_limited,
                 "transient_midrun_error": state.transient_midrun_error,
                 "finish_reason": (
-                    f"budget_exhausted:{state.dispatch_exhaustion_reason}"
+                    # A cancellation is delivered the same way a spent ceiling
+                    # is — the next dispatch is refused — but it is not one, and
+                    # it must not be filed as one. "budget_exhausted:cancelled"
+                    # would be counted by anyone measuring how often a model
+                    # exhausts its budget, and what it would be counting is the
+                    # operator pressing Ctrl+C.
+                    CANCELLED_REASON
+                    if state.dispatch_exhaustion_reason == CANCELLED_REASON
+                    else f"budget_exhausted:{state.dispatch_exhaustion_reason}"
                     if state.dispatch_exhaustion_reason is not None
                     else (
                         "completed"
