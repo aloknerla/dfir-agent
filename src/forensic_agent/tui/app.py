@@ -2446,6 +2446,9 @@ class InvestigationApp(App):
         # that thread is still inside session.ask(); a second ask() on the
         # same session while it runs would race the session's own state.
         self._ask_thread_alive = False
+        #: Commands taken while a message was in flight, waiting for it to end.
+        self._deferred_commands: list[tuple[str, str]] = []
+        self._deferred_drain_queued = False
         self._reviewing = False
         # A case operation (open, attach, continue, complete) mutating the
         # session on its own worker thread; asks and other commands wait.
@@ -2550,6 +2553,12 @@ class InvestigationApp(App):
         # refreshing queries the DOM.
         if self.is_running:
             self._refresh_working_line()
+        # A finished run is the moment anything taken for the next one applies.
+        # Watched here rather than called from each of the four places that
+        # clear the flag, because one of them would be forgotten: the reactive
+        # is the single fact "a message is in flight".
+        if not _new:
+            self._drain_deferred_soon()
 
     def _tick(self) -> None:
         if self.running:
@@ -3365,6 +3374,102 @@ class InvestigationApp(App):
         "verify": "streams the whole medium the run is reading from",
     }
 
+    #: Commands whose whole effect is on the NEXT question, and which therefore
+    #: do not have to be refused while one is in flight — they are taken now and
+    #: run when the run ends.
+    #:
+    #: Membership is not "it looks harmless". Each of these was traced to the
+    #: point where the running ask() reads what it changes, and each is read
+    #: ONCE, as an argument at the call: ``runner.ask(...)`` takes
+    #: ``case_context`` by value, and the runner itself is built by
+    #: ``_controlled_runner()`` before the question starts and held in a local
+    #: for the rest of it. Nothing either command changes can reach a run that
+    #: has already begun.
+    #:
+    #: That is why they are DEFERRED rather than simply admitted. Running them
+    #: now would be safe for the run's inputs and unsafe for everything else
+    #: about them: ``change_model`` builds a replacement conversation and
+    #: activates it (``session.change_model`` -> ``_activate_model_context``),
+    #: which swaps the history the run is still writing into, and both of them
+    #: print into the session console that the run's own thread is printing to.
+    #: Waiting until the run is over removes both hazards and keeps the promise
+    #: the operator was given: it applies to the next message.
+    _DEFERRABLE_WHILE_RUNNING: ClassVar[dict[str, str]] = {
+        "model": "the model your next message runs on",
+        "context": "the case brief your next message carries",
+    }
+
+    def _deferrable_form(self, name: str, argument: str) -> str | None:
+        """What this exact invocation would set, or None if it is not a setting.
+
+        Only the forms that CHANGE something are taken and held. A bare /model
+        or /context opens a view or a chooser, and holding one of those for the
+        end of the run answers a question the operator asked now; /model list
+        goes further and ends in a picker whose whole point is that it is in
+        front of them. Those keep the refusal they had.
+        """
+
+        text = argument.strip()
+        if name == "model":
+            first = text.split(None, 1)[0].casefold() if text else ""
+            if not text or first == "list":
+                return None
+            return self._DEFERRABLE_WHILE_RUNNING["model"]
+        if name == "context":
+            if not text:
+                return None
+            action = text.split(None, 1)[0].casefold()
+            if action == "show":
+                return None
+            return self._DEFERRABLE_WHILE_RUNNING["context"]
+        return None
+
+    def _defer_command(self, name: str, argument: str, sets: str) -> None:
+        """Take a command now and run it when the console is free.
+
+        Said out loud, because a command that is silently held is a command the
+        operator believes did not register. The queue keeps its order: two
+        /model calls apply in the order they were typed, and the last one wins
+        for the same reason it would have if they had been typed a minute apart.
+        """
+
+        self._deferred_commands.append((name, argument))
+        typed = f"/{name} {argument}".strip()
+        self.notify(
+            f"{typed} is accepted and sets {sets}. It applies when this message "
+            "is finished, not to this one.",
+            title=f"/{name}",
+        )
+        self._drain_deferred_soon()
+
+    #: How long after the console looks free the queue is looked at again. Only
+    #: ever armed while something is queued, so an idle console runs no timer.
+    _DEFERRED_SETTLE_S = 0.25
+
+    def _drain_deferred_soon(self) -> None:
+        if self._deferred_commands and not self._deferred_drain_queued:
+            self._deferred_drain_queued = True
+            self.set_timer(self._DEFERRED_SETTLE_S, self._drain_deferred)
+
+    def _drain_deferred(self) -> None:
+        """Run what was taken while the console was busy, once it is free.
+
+        "Free" is all three of the conditions the refusal above tests, not just
+        ``running``: Ctrl+C clears ``running`` immediately while the orphaned
+        thread is still inside session.ask(), and applying a model change into
+        that window is exactly the race the deferral exists to avoid.
+        """
+
+        self._deferred_drain_queued = False
+        if not self._deferred_commands:
+            return
+        if self.running or self._ask_thread_alive or self._case_op_alive:
+            self._drain_deferred_soon()
+            return
+        pending, self._deferred_commands = self._deferred_commands, []
+        for name, argument in pending:
+            self.dispatch_command(name, argument)
+
     def dispatch_command(self, name: str, argument: str = "") -> None:
         # An alias answers here too. Handlers are named for the CANONICAL
         # command (`_cmd_resume`), so a caller that reached this method with
@@ -3382,6 +3487,12 @@ class InvestigationApp(App):
             # other side — a case opening or completing on its own worker.
             and (self.running or self._ask_thread_alive or self._case_op_alive)
         ):
+            deferred_as = self._deferrable_form(name, argument)
+            if deferred_as is not None:
+                # Nothing it changes can reach the run in flight, so there is
+                # no reason to make the operator wait, watch, and type it again.
+                self._defer_command(name, argument, deferred_as)
+                return
             reason = self._BLOCKED_WHILE_RUNNING.get(name, "changes the session")
             self.notify(
                 (

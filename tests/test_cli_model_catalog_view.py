@@ -177,9 +177,19 @@ def _render(
     base_url: str = _OPENROUTER,
     **kwargs: Any,
 ) -> list[str]:
-    """The lines the listing actually produces at ``width`` columns."""
+    """The lines the listing actually produces at ``width`` columns.
 
-    console = Console(width=width, record=True, file=io.StringIO())
+    Both the width and the box substitution are pinned, and for one reason:
+    neither is the same here as it is where this ships. Rich degrades a rounded
+    box to the square set on legacy Windows, so the panel this view draws has
+    different corners on a developer's terminal than in the container and in
+    CI. Pinning the modern rendering means the assertions below describe the
+    output that is actually shipped, on every machine that runs them.
+    """
+
+    console = Console(
+        width=width, record=True, file=io.StringIO(), legacy_windows=False
+    )
     show_model_catalog(
         console,
         selector,
@@ -191,17 +201,37 @@ def _render(
     return [line.rstrip() for line in console.export_text().rstrip("\n").split("\n")]
 
 
+#: The characters a panel's bottom-left corner can be, and its sides. Rich
+#: substitutes a box style for the console it is drawing to: ROUNDED keeps its
+#: rounded corners on a modern terminal and degrades to the square set on
+#: legacy Windows. Both are correct output, so a test that recognises the frame
+#: by one of them passes on the machine it was written on and fails on the
+#: other. Every corner Rich can produce for these boxes is listed.
+_FRAME_BOTTOM_LEFT = "└╰┗╚"
+_FRAME_TOP_LEFT = "┌╭┏╔"
+_FRAME_EDGE = "│┃║"
+
+
 def _below_the_frame(lines: list[str]) -> list[str]:
     """Everything under the header panel: the sheet itself, and nothing else.
 
     The panel names the configured model, so a count of "how often does this
     publisher prefix appear in the listing" has to start after it.
+
+    Raises when there is no frame to be under, rather than returning the whole
+    render. Falling back to "everything" is what let this helper look correct:
+    the frame came back with the sheet, the configured model was counted as a
+    listed row, and the count was only right because one machine drew a corner
+    this function happened to name.
     """
 
     for index, line in enumerate(lines):
-        if line.startswith("└"):
+        if line[:1] and line[0] in _FRAME_BOTTOM_LEFT:
             return lines[index + 1 :]
-    return lines
+    raise AssertionError(
+        "no panel frame was found in the render, so nothing can be said to be "
+        f"below it: {lines[:3]}"
+    )
 
 
 #: A row of the sheet: the one-cell mark column, its padding, then the label.
@@ -224,7 +254,7 @@ def _listed_identifiers(lines: list[str]) -> list[str]:
             prefix = title if title.endswith("/") else ""
             continue
         if not _ROW.match(line):
-            if line and not line.startswith((" ", "─", "│", "┌", "└")):
+            if line and line[0] not in " ─" + _FRAME_EDGE + _FRAME_TOP_LEFT + _FRAME_BOTTOM_LEFT:
                 # A section verdict, or the footer: any open group ends here.
                 prefix = ""
             continue
@@ -406,6 +436,7 @@ def test_the_listing_is_drawn_in_the_palette_it_is_handed() -> None:
         file=io.StringIO(),
         force_terminal=True,
         color_system="truecolor",
+        legacy_windows=False,
     )
     show_model_catalog(
         console,

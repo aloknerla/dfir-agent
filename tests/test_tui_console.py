@@ -2016,3 +2016,95 @@ def test_switching_to_the_simple_layout_keeps_the_activity_already_recorded():
             assert len(inline()) == 1
 
     asyncio.run(scenario())
+
+
+def test_a_setting_typed_mid_run_is_taken_and_applied_to_the_next_message():
+    """Refusing a command whose effect is entirely on the NEXT question.
+
+    /model and /context set what the next message runs on and carries. The run
+    in flight cannot see either of them — the runner is built before the
+    question starts and held in a local, and the case brief is passed by value
+    into runner.ask — so refusing them cost the operator the command and taught
+    them to wait and retype it. They are taken now and applied when the run
+    ends. The forms that only LOOK at something keep the refusal, because
+    answering "here is the model list" after the run is not answering.
+    """
+
+    async def scenario():
+        app = build_app(_FakeLiveController())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.2)
+            notices: list[str] = []
+            app.notify = lambda message, **kw: notices.append(str(message))
+
+            app.running = True
+            await pilot.pause(0.05)
+
+            app.dispatch_command("context", "set the host is a domain controller")
+            app.dispatch_command("model", "openai/gpt-oss-120b")
+            await pilot.pause(0.05)
+            assert [name for name, _argument in app._deferred_commands] == [
+                "context",
+                "model",
+            ]
+            assert any("applies when this message is finished" in n for n in notices)
+            # Nothing has been applied yet: the run is still going.
+            assert app._controller.session.context_set == []
+
+            # What is not a setting keeps the refusal it had.
+            notices.clear()
+            app.dispatch_command("case", "disk /evidence/image.E01")
+            app.dispatch_command("model", "")
+            await pilot.pause(0.05)
+            assert len(app._deferred_commands) == 2, "a view was queued as a setting"
+            assert all("cannot happen while" in n for n in notices), notices
+
+            # The run ends, and what was taken applies, in the order it was typed.
+            app.running = False
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if not app._deferred_commands:
+                    break
+            assert app._deferred_commands == []
+            assert app._controller.session.context_set == [
+                "the host is a domain controller"
+            ]
+
+    asyncio.run(scenario())
+
+
+def test_nothing_deferred_is_applied_while_the_orphaned_thread_is_still_running():
+    """Ctrl+C clears `running` while the thread is still inside session.ask().
+
+    That window is exactly the race the deferral exists to avoid, so the queue
+    has to wait for it too, not merely for the flag.
+    """
+
+    async def scenario():
+        app = build_app(_FakeLiveController())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.2)
+            app.notify = lambda message, **kw: None
+            app.running = True
+            app._ask_thread_alive = True
+            await pilot.pause(0.05)
+            app.dispatch_command("context", "set still investigating")
+            await pilot.pause(0.05)
+            assert len(app._deferred_commands) == 1
+
+            # Cancelled: the flag clears, the thread has not.
+            app.running = False
+            for _ in range(6):
+                await pilot.pause(0.05)
+            assert app._deferred_commands, "applied while the ask thread was alive"
+            assert app._controller.session.context_set == []
+
+            # The thread finishes, and only then does it apply.
+            app._ask_thread_alive = False
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if not app._deferred_commands:
+                    break
+            assert app._controller.session.context_set == ["still investigating"]
+
+    asyncio.run(scenario())
