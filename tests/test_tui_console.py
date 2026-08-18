@@ -914,7 +914,10 @@ def test_layout_simple_inlines_activity_under_the_answer():
                 if not app.running:
                     break
             await pilot.pause(0.2)
-            assert list(app.query("#inline-1")), "no inline activity block"
+            # Found by class, not by id: an inline block carries no id,
+            # because a layout toggle re-mounts it while the previous one is
+            # still being removed and two of an id crash the console.
+            assert list(app.query(".inline-activity")), "no inline activity block"
 
             app.dispatch_command("layout", "full")
             await pilot.pause(0.2)
@@ -922,7 +925,7 @@ def test_layout_simple_inlines_activity_under_the_answer():
             assert app.query_one("#rightcol").styles.display == "block"
             # The composite layout owns the ACTIVITY pane, so the inline copy
             # of the same rows must not still be sitting in the conversation.
-            assert not list(app.query("#inline-1"))
+            assert not list(app.query(".inline-activity"))
 
     asyncio.run(scenario())
 
@@ -996,7 +999,7 @@ def test_inline_activity_pairs_recorder_cards_with_feed_events_by_order():
 
             from rich.console import Console as RichConsole
 
-            block = app.query_one("#inline-1")
+            block = app.query_one(".inline-activity", Static)
             console = RichConsole(width=110, record=True, file=io.StringIO())
             console.print(block.render()._renderable)
             text = console.export_text()
@@ -1839,3 +1842,68 @@ def test_every_usage_line_reaches_the_input_border_verbatim():
 
     # And the encoding itself is total: nothing survives as a style tag.
     assert Text.from_markup(_literal_markup("[bold]x[/]")).plain == "[bold]x[/]"
+
+
+def test_switching_to_the_simple_layout_keeps_the_activity_already_recorded():
+    """The activity a layout switch used to lose.
+
+    The inline block was written at the moment an exchange finished and only
+    when the simple layout was already active. An exchange run under the full
+    layout therefore never got one, and switching afterwards did not go back
+    and add it: the operator arrived in a layout with no ACTIVITY pane and no
+    inline block either, so the run they had just watched was simply gone from
+    the screen. Nothing was ever lost from the record — only from the view.
+    """
+
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(140, 44)) as pilot:
+            await pilot.pause(0.2)
+            assert app._layout == "full"
+            app.query_one("#prompt").value = "which USB device was connected?"
+            await pilot.press("enter")
+            for _ in range(80):
+                await pilot.pause(0.05)
+                if not app.running:
+                    break
+            await pilot.pause(0.3)
+
+            def inline():
+                return list(app.query(".inline-activity"))
+
+            # The full layout shows it in the pane, so nothing is inline.
+            assert inline() == []
+            assert app.query_one("#grp-1") is not None
+
+            app._cmd_layout("simple")
+            await pilot.pause(0.3)
+            blocks = inline()
+            assert len(blocks) == 1, "the exchange that already ran lost its activity"
+            # And it is inside its own exchange, under the answer, rather than
+            # appended to the end of the conversation.
+            children = list(app.query_one("#conversation", VerticalScroll).children)
+            position = children.index(blocks[0])
+            assert position == len(children) - 2, (
+                "the block was not mounted in front of its exchange's separator"
+            )
+
+            # Back to full: the pane has it, so the inline copy goes. The two
+            # must never be on screen at once.
+            app._cmd_layout("full")
+            await pilot.pause(0.3)
+            assert inline() == []
+            assert app.query_one("#grp-1") is not None
+
+            # And toggling is stable — no accumulation, no loss.
+            for _ in range(2):
+                app._cmd_layout("simple")
+                await pilot.pause(0.25)
+                assert len(inline()) == 1
+                app._cmd_layout("full")
+                await pilot.pause(0.25)
+                assert inline() == []
+            app._cmd_layout("simple")
+            await pilot.pause(0.25)
+            assert len(inline()) == 1
+
+    asyncio.run(scenario())

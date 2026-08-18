@@ -1,38 +1,3 @@
-<a id="hrvatski"></a>
-
-**Hrvatski** · [English](#english)
-
-# Dokumentacija
-
-Ovaj direktorij opisuje kako je DFIR Agent zamišljen: jezični model vezan uz
-zatvoren skup provjerenih forenzičkih alata, s determinističkim nadzornim slojem
-koji provjerava svaku radnju i zapisom cijelog izvođenja u `audit.jsonl`,
-povezanim u lanac sažetaka pa je naknadna izmjena zapisa vidljiva.
-
-## Preporučeni redoslijed čitanja
-
-1. [Pregled arhitekture](ARCHITECTURE_OVERVIEW.md) opisuje što sustav jest i, na
-   jednoj stranici, što ga sprječava da ustvrdi nešto što dokazi ne podupiru.
-   Imenuje datoteku i funkciju koja provodi svaku provjeru odgovora.
-2. [Arhitektura](ARCHITECTURE.md) donosi arhitekturu na visokoj razini, dijagram
-   slojeva i životni ciklus dokaza od početka do kraja.
-3. [Detalji arhitekture](ARCHITECTURE_DETAIL.md) donose pogled održavatelja:
-   put izvođenja redom, od pritiska tipke do objavljenog odgovora, s dijagramima
-   tijeka poziva i slojeva.
-4. [Upute za rad](USAGE.md) opisuju kako pokrenuti konzolu i koje `/` naredbe
-   prihvaća.
-
-## Slike
-
-Izvori dijagrama prikazanih u gornjim dokumentima nalaze se u
-[`figures/`](figures/).
-
----
-
-<a id="english"></a>
-
-[Hrvatski](#hrvatski) · **English**
-
 # Documentation
 
 This directory documents the design of DFIR Agent: a language model bound to a

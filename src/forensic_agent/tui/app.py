@@ -2389,6 +2389,25 @@ class InvestigationApp(App):
         #: arrow key: moving through the list must not re-scan the registry.
         self._hint_matches: tuple[tuple[str, str, str], ...] = ()
         self._hint_index = 0
+        #: What each finished exchange did, kept so the simple layout can show
+        #: it whenever it is switched to rather than only for the exchanges
+        #: that happened to finish while it was already active. The feed itself
+        #: cannot answer this later: ``_activity_log`` is emptied by the next
+        #: run. Two references and a tuple of events per exchange, built from
+        #: values the exchange had already assembled.
+        self._exchange_record: dict[
+            int, tuple[InvestigationResult, tuple[ToolEvent, ...]]
+        ] = {}
+        #: The blank row that closes each exchange, by exchange number. It is
+        #: what an inline activity block is mounted in front of, so a block
+        #: added by a layout switch lands inside its own exchange rather than
+        #: at the end of the conversation.
+        self._exchange_end: dict[int, Static] = {}
+        #: Which exchanges currently have an inline activity block mounted.
+        #: Tracked rather than read back from the DOM because removal in
+        #: Textual is deferred: a fast toggle would find the widget still there
+        #: and skip a mount, or mount a second one beside it.
+        self._inline_exchanges: set[int] = set()
         self._evidence_cards: list[FindingCard] = []
         self._evidence_lists: dict[int, ListView] = {}
         self._guardrail_groups: dict[int, Vertical] = {}
@@ -3978,6 +3997,12 @@ class InvestigationApp(App):
                 pane.border_subtitle = ""
         self._activity_rows.clear()
         self._activity_log.clear()
+        # The transcript these described has just been emptied, so the record
+        # of what each exchange did goes with it; keeping it would let a later
+        # layout switch mount a block for an exchange no longer on screen.
+        self._exchange_record.clear()
+        self._exchange_end.clear()
+        self._inline_exchanges.clear()
         self._guardrail_groups.clear()
         self._guardrail_blocks.clear()
         self._guardrail_allowed_total = 0
@@ -4065,7 +4090,9 @@ class InvestigationApp(App):
         already = choice == self._layout
         self._layout = choice
         self.query_one("#rightcol").styles.display = "none" if simple else "block"
-        if not simple:
+        if simple:
+            self._restore_inline_activity()
+        else:
             self._clear_inline_activity()
         if already:
             self.notify(f"The {choice} layout is already active.", title="/layout")
@@ -4084,8 +4111,72 @@ class InvestigationApp(App):
     def _clear_inline_activity(self) -> None:
         """Take the simple layout's activity blocks out of the conversation."""
 
+        self._inline_exchanges.clear()
         for widget in self.query(f".{_INLINE_ACTIVITY_CLASS}"):
             widget.remove()
+
+    def _show_inline_activity(self, exchange: int) -> None:
+        """Write one finished exchange's calls under its own answer.
+
+        Mounted before that exchange's separator rather than at the end of the
+        conversation, so a block added by a layout switch lands where the block
+        written live would have: under the answer it belongs to, inside its own
+        exchange. An exchange that already has one is left alone, which is what
+        makes switching back and forth cost nothing after the first time.
+        """
+
+        if self._layout != "simple" or exchange in self._inline_exchanges:
+            return
+        record = self._exchange_record.get(exchange)
+        if record is None:
+            return
+        result, events = record
+        if not (result.oversight or events):
+            return
+        pane = self.query_one("#conversation", VerticalScroll)
+        anchor = self._exchange_end.get(exchange)
+        if exchange in self._exchange_end and (
+            anchor is None or anchor.parent is None
+        ):
+            # The exchange ended and its separator has since been removed —
+            # discarded, or cleared away. There is nothing left for its
+            # activity to sit under, and appending it would put an old
+            # exchange's calls at the bottom of a newer one.
+            return
+        # Marked as the simple layout's own surface. The full layout has the
+        # ACTIVITY pane for this, and the two must never be on screen at once,
+        # so the class is what the layout teardown removes them by. No id:
+        # removal is deferred, and a re-mount racing a pending removal of the
+        # same id crashes the console with DuplicateIds.
+        widget = _painted(
+            partial(self._inline_activity, result, events),
+            classes=_INLINE_ACTIVITY_CLASS,
+        )
+        if anchor is None:
+            # The exchange is still being written: the end of the conversation
+            # IS the end of this exchange, so appending puts the block exactly
+            # where mounting in front of the separator will put it a moment
+            # later. Both paths therefore leave it in the same place.
+            pane.mount(widget)
+        else:
+            pane.mount(widget, before=anchor)
+        self._inline_exchanges.add(exchange)
+
+    def _restore_inline_activity(self) -> None:
+        """Give the simple layout every exchange, not only the ones since the switch.
+
+        The inline block used to be written at the moment an exchange finished
+        and only when the simple layout was already active, so switching to it
+        showed the activity of exchanges that had not happened yet and nothing
+        of the ones the operator had actually run. Nothing was lost from the
+        record — only from the screen — so the switch rebuilds them.
+
+        Done on the switch and never per frame; the blocks that exist already
+        are skipped, so toggling twice costs one mount each way.
+        """
+
+        for exchange in sorted(self._exchange_record):
+            self._show_inline_activity(exchange)
 
     def _inline_activity(
         self, result: InvestigationResult, events: tuple[ToolEvent, ...]
@@ -6243,20 +6334,16 @@ class InvestigationApp(App):
         self._last_result = result
         self._finalize_activity(result)
         self._write_agent(result)
-        if self._layout == "simple":
-            # The feed is snapshotted here: _activity_log is emptied by the
-            # next run, and a re-theme must still be able to redraw this block.
-            events = tuple(event for _seq, event in sorted(self._activity_log.items()))
-            if result.oversight or events:
-                # Marked as the simple layout's own surface. The full layout
-                # has the ACTIVITY pane for this, and the two must never be on
-                # screen at once, so the class is what the layout teardown
-                # removes them by.
-                self._say(
-                    partial(self._inline_activity, result, events),
-                    widget_id=f"inline-{self._exchange}",
-                    classes=_INLINE_ACTIVITY_CLASS,
-                )
+        # The feed is snapshotted here whatever the layout: _activity_log is
+        # emptied by the next run, so this is the last moment at which what
+        # this exchange did can still be written down. Recording it in both
+        # layouts is what lets a switch to the simple one show the exchanges
+        # that ran before the switch.
+        self._exchange_record[self._exchange] = (
+            result,
+            tuple(event for _seq, event in sorted(self._activity_log.items())),
+        )
+        self._show_inline_activity(self._exchange)
         self._queue_findings_review(result)
         self._end_exchange()
         self._populate_guardrails(result)
@@ -6480,7 +6567,12 @@ class InvestigationApp(App):
         construction rather than by coincidence.
         """
 
-        self._say(Text(""))
+        # Kept by reference and never by id. _end_exchange runs on more paths
+        # than one per number — a discarded run ends its exchange too — and a
+        # fixed id here would crash the console with DuplicateIds the first
+        # time two of them met. This is the same reason the welcome banner is
+        # reached through a reference.
+        self._exchange_end[self._exchange] = self._say(Text(""))
 
     def _agent_bubble(self, result: InvestigationResult, number: int) -> Table:
         _glyph, verdict_colour, _word = _verdict(result.answer_source)
