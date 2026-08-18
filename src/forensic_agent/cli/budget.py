@@ -1,14 +1,17 @@
-"""Per-question step and tool-call budgets the interactive console remembers.
+"""Per-question time, step and tool-call budgets the interactive console remembers.
 
-Both bound one question's investigation loop rather than the case, and both
-outlive the session: they are written to the operator's saved configuration so
-the next console starts on the budgets this one ended with, exactly like the
+All three bound one question's investigation loop rather than the case, and all
+three outlive the session: they are written to the operator's saved configuration
+so the next console starts on the budgets this one ended with, exactly like the
 terminal language and the reasoning effort. A budget passed on the command line
 still wins for that launch; only the standing default is stored here.
 
-The value has no fixed upper bound. Twenty is the default an unconfigured
-console uses, and the fallback whenever a saved value is missing or unreadable,
-but the operator, not the tool, sets the ceiling.
+None of them has a fixed upper bound. Twenty steps, twenty tool calls and nine
+hundred seconds are the defaults an unconfigured console uses, and the fallbacks
+whenever a saved value is missing or unreadable, but the operator, not the tool,
+sets the ceiling. That matters most for the clock: a run that exhausts it ends
+with ``budget_exhausted:max_wall_time_s`` and no finding, and until the console
+could set it the only recourse was to relaunch.
 """
 
 from __future__ import annotations
@@ -23,8 +26,19 @@ import forensic_agent.cli.preferences as _preferences
 #: saved value.
 DEFAULT_BUDGET: Final[int] = 20
 
+#: Seconds of wall clock one question may spend when the operator has never set
+#: it. Restated from ``ControlledInvestigationSession.__init__``, whose
+#: ``max_wall_time_s`` default has always been this number and which explains
+#: why it is not smaller: one honest streaming pass over a 20 GB image can take
+#: minutes, and the ceiling exists to bound a runaway loop rather than that.
+#: The console cannot import that class to read the default — it is built lazily
+#: per question, from a module this one must not pull in at import time — so the
+#: two are pinned together by a test instead of being allowed to drift.
+DEFAULT_MAX_WALL_TIME_S: Final[int] = 900
+
 _MAX_STEPS_KEY: Final[str] = "max_steps"
 _MAX_TOOL_CALLS_KEY: Final[str] = "max_tool_calls"
+_MAX_WALL_TIME_KEY: Final[str] = "max_wall_time_s"
 
 
 def normalize_budget(value: object) -> int:
@@ -45,14 +59,19 @@ def normalize_budget(value: object) -> int:
     return parsed
 
 
-def _load(key: str, environment: Mapping[str, str] | None, path: Path | None) -> int:
+def _load(
+    key: str,
+    environment: Mapping[str, str] | None,
+    path: Path | None,
+    fallback: int = DEFAULT_BUDGET,
+) -> int:
     stored = _preferences.read_preference(key, environment, path=path)
     if stored is not None:
         try:
             return normalize_budget(stored)
         except (ValueError, TypeError):
-            return DEFAULT_BUDGET
-    return DEFAULT_BUDGET
+            return fallback
+    return fallback
 
 
 def load_saved_max_steps(
@@ -69,6 +88,16 @@ def load_saved_max_tool_calls(
     """Read the saved tool-call budget, defaulting to twenty when absent or invalid."""
 
     return _load(_MAX_TOOL_CALLS_KEY, environment, path)
+
+
+def load_saved_max_wall_time_s(
+    environment: Mapping[str, str] | None = None, *, path: Path | None = None
+) -> int:
+    """Read the saved time budget in seconds, defaulting when absent or invalid."""
+
+    return _load(
+        _MAX_WALL_TIME_KEY, environment, path, fallback=DEFAULT_MAX_WALL_TIME_S
+    )
 
 
 def save_max_steps(
@@ -88,4 +117,14 @@ def save_max_tool_calls(
 
     _preferences.save_preference(
         _MAX_TOOL_CALLS_KEY, str(normalize_budget(value)), environment, path=path
+    )
+
+
+def save_max_wall_time_s(
+    value: object, environment: Mapping[str, str] | None = None, *, path: Path | None = None
+) -> None:
+    """Persist the time budget in seconds, preserving any other preferences."""
+
+    _preferences.save_preference(
+        _MAX_WALL_TIME_KEY, str(normalize_budget(value)), environment, path=path
     )

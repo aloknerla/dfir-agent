@@ -759,6 +759,47 @@ class MalwareScanAllCandidatesArguments(OperationArguments):
     operation: Literal["scan_all_candidates"] = "scan_all_candidates"
 
 
+# --- memory_strings (its own function)
+
+#: Ceiling on how many hits ONE scan of the image may collect.  It mirrors the
+#: clamp the scanner applies to the same argument, so a bound the schema accepts
+#: is a bound the scan honours rather than one it silently lowers.
+_MEMORY_STRING_HIT_CAP = 2000
+
+
+class MemoryPatternHitsArguments(OperationArguments):
+    operation: Literal["pattern_hits"] = "pattern_hits"
+    pattern: _NonEmptyText = Field(
+        description=(
+            "One regular expression, matched against the image read as text. It "
+            "is a pattern and not a literal term: characters that mean something "
+            "to a regular-expression engine keep that meaning here."
+        ),
+    )
+    encoding: Literal["ascii", "utf16le", "both"] = Field(
+        default="both",
+        description=(
+            "Which text view of the bytes the pattern is matched in. 'ascii' "
+            "reads each byte as one character; 'utf16le' reads pairs of bytes as "
+            "UTF-16LE text; 'both' matches in each view, and is the default "
+            "because a memory image carries strings in both."
+        ),
+    )
+    max_hits: int = Field(
+        default=200,
+        ge=1,
+        le=_MEMORY_STRING_HIT_CAP,
+        description=(
+            "How many hits the SCAN collects at all, which is not the page size. "
+            "A scan stopped by this bound reports incomplete coverage, and the "
+            "answer to that is a narrower pattern or a higher bound, never a "
+            "further page."
+        ),
+    )
+    limit: int = Field(default=50, ge=1)
+    offset: int = Field(default=0, ge=0)
+
+
 # --- pcap_query
 
 
@@ -1604,7 +1645,11 @@ _DOMAIN_FUNCTIONS: tuple[DomainFunction, ...] = (
             "Volatility 3 over the bound memory image: the rows one curated "
             "plugin emitted, and — as separate operations asked for by name — "
             "computations this project performs over those rows. No computed "
-            "value ever travels inside an observed row."
+            "value ever travels inside an observed row. A plugin reports only "
+            "what its format models, so a string that survives in memory with "
+            "no structure describing it appears in no plugin's rows: reach it "
+            "with memory_strings, over the image's raw bytes, rather than by "
+            "paging another plugin that cannot carry it."
         ),
         operations=(
             _observed(
@@ -1678,6 +1723,47 @@ _DOMAIN_FUNCTIONS: tuple[DomainFunction, ...] = (
                 "Scan and rank the complete bounded candidate population.",
             ),
         ),
+    ),
+    DomainFunction(
+        name="memory_strings",
+        scope=SCOPE_MEMORY,
+        summary=(
+            "A regular-expression search over the RAW BYTES of the bound memory "
+            "image, the structured equivalent of running strings over the dump "
+            "and grepping the result. It reads the image as bytes, in the "
+            "single-byte and the UTF-16LE text view, and consults no Volatility "
+            "plugin, so it reaches text that survives in memory with no structure "
+            "describing it. Reach for it when the artefact IS such a string and "
+            "nothing models it — a URL, a command line, a host name, a credential "
+            "or token, a file name — or when the plugins that would model it have "
+            "returned nothing and the value is known to be somewhere in the "
+            "image. It is the WRONG instrument where a plugin already models the "
+            "artefact: processes, network connections, handles, loaded modules, "
+            "services and registry hives in memory are read through memory_query, "
+            "which returns them as records carrying structure and provenance a "
+            "byte match cannot supply, so a pattern that happens to match a "
+            "process name establishes less than the process listing that names "
+            "it. A hit is UNANCHORED: the offset locates the bytes in the image "
+            "and states nothing about which process owned them, whether the "
+            "allocation was live, or when they were written, so a match is a lead "
+            "to corroborate and not an attribution. Encrypted, compressed and "
+            "paged-out regions hold no readable text and match nothing, so an "
+            "empty result is a statement about this pattern in this image and "
+            "never that the artefact was absent from the machine."
+        ),
+        operations=(
+            _derived(
+                "pattern_hits",
+                MemoryPatternHitsArguments,
+                "memory.string_scan",
+                (_producer("cpython_stdlib"),),
+                "Every match of the pattern in the image's bytes, each with its "
+                "offset, the view it matched in and the bytes around it, ordered "
+                "by offset. The order is the image's own; nothing here ranks a "
+                "hit, because which one matters is a question about the case.",
+            ),
+        ),
+        default_operation="pattern_hits",
     ),
     DomainFunction(
         name="pcap_query",

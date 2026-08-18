@@ -380,8 +380,12 @@ def test_the_completion_list_covers_names_and_aliases():
     completions = slash_completions()
     assert "/clear" in completions
     assert "/guardrails" in completions  # an alias of /oversight
-    # /steps and /toolcalls were removed: /effort is the one command, and
-    # the budgets are its arguments.
+    # Two commands, one subject each: the model's reasoning level and the
+    # resource ceilings. /steps and /toolcalls are arguments of /budget, and
+    # /effort — which merged the two subjects for a while — is gone with them.
+    assert "/reasoning" in completions
+    assert "/budget" in completions
+    assert "/effort" not in completions
     assert "/steps" not in completions
     assert "/toolcalls" not in completions
     assert completions == tuple(sorted(completions))

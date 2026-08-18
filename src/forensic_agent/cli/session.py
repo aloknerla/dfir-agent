@@ -413,6 +413,12 @@ class InteractiveSession:
             if cli_tool_calls is not None
             else _budget.load_saved_max_tool_calls()
         )
+        cli_wall_time = getattr(args, "max_wall_time_s", None)
+        self.max_wall_time_s = (
+            max(1, int(cli_wall_time))
+            if cli_wall_time is not None
+            else _budget.load_saved_max_wall_time_s()
+        )
         self.disk: _Disk | None = None
         self.disk_label = "none"
         self.case_label = "none"
@@ -1699,11 +1705,16 @@ class InteractiveSession:
             on_effort_changed=self._drop_cached_runner,
         )
 
+    # command_name is the command whose declared form a mistyped value is
+    # answered with, and all three budgets are arguments of /budget rather
+    # than commands, so all three name it. Passing "steps" here would have
+    # the console answer a mistyped step budget with "/steps", which is not
+    # a command this console has.
     def change_steps(self, argument: str) -> None:
         _console_settings.change_budget(
             self._console,
             argument,
-            command_name="steps",
+            command_name="budget",
             label=_t("Step budget:"),
             current=self.max_steps,
             apply=self._apply_max_steps,
@@ -1718,7 +1729,7 @@ class InteractiveSession:
         _console_settings.change_budget(
             self._console,
             argument,
-            command_name="toolcalls",
+            command_name="budget",
             label=_t("Tool-call budget:"),
             current=self.max_tool_calls,
             apply=self._apply_max_tool_calls,
@@ -1729,9 +1740,35 @@ class InteractiveSession:
         self.max_tool_calls = value
         self._runner = None
 
+    def change_time(self, argument: str) -> None:
+        """Set the wall clock one question may spend, in whole seconds.
+
+        The same control as the other two budgets, and deliberately down the
+        same path: validated by the same rule, saved as the standing default,
+        and applied by dropping the cached runner so the next question is
+        built under it. Until this existed a run that ended with
+        ``budget_exhausted:max_wall_time_s`` could not be given more time from
+        the console at all.
+        """
+
+        _console_settings.change_budget(
+            self._console,
+            argument,
+            command_name="budget",
+            label=_t("Time budget (s):"),
+            current=self.max_wall_time_s,
+            apply=self._apply_max_wall_time_s,
+            save=_budget.save_max_wall_time_s,
+        )
+
+    def _apply_max_wall_time_s(self, value: int) -> None:
+        self.max_wall_time_s = value
+        self._runner = None
+
     def show_budget(self) -> None:
-        """Show the per-question step and tool-call budgets together."""
+        """Show the per-question time, step and tool-call budgets together."""
         self._console.print(
+            f"{_t('Time budget (s):')} [bold]{self.max_wall_time_s}[/]  ·  "
             f"{_t('Step budget:')} [bold]{self.max_steps}[/]  ·  "
             f"{_t('Tool-call budget:')} [bold]{self.max_tool_calls}[/]"
         )
@@ -1980,6 +2017,7 @@ class InteractiveSession:
                 output_root=self.run_root,
                 max_steps=self.max_steps,
                 max_tool_calls=self.max_tool_calls,
+                max_wall_time_s=self.max_wall_time_s,
             )
         return self._runner
 

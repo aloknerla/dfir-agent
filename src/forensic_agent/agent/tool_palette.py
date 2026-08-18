@@ -27,8 +27,10 @@ they could not import.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Literal
+from collections.abc import Collection, Mapping, Sequence
+from itertools import product
+from types import MappingProxyType
+from typing import Literal, get_args
 
 from forensic_agent.agent.result_navigator import RESULT_PAGE_TOOL_NAME
 from forensic_agent.agent.tool_operations import DOMAIN_FUNCTIONS
@@ -38,6 +40,7 @@ from forensic_agent.agent.tool_taxonomy import (
 from forensic_agent.agent.tool_taxonomy import (
     PCAP_TOOLS as _TAXONOMY_PCAP_TOOLS,
 )
+from forensic_agent.core.tool_availability import QUARANTINED_MODEL_TOOL_NAMES
 
 DISK_TOOLS = frozenset(
     {
@@ -128,21 +131,40 @@ DOMAIN_WINDOWS_DISK_FUNCTIONS = frozenset(
         "evtx_query",
     }
 )
-DOMAIN_MEMORY_FUNCTIONS = frozenset({"memory_query", "memory_malware_scan"})
+#: The LIVE memory palette, which is wider than the frozen historical record
+#: above: ``memory_strings`` is offered here beside the plugin front-end because
+#: a memory examination that meets a loose string no plugin models otherwise has
+#: no way to reach it.  The historical set is NOT widened to match — it records
+#: what those runs were actually offered, and they were not offered this.
+DOMAIN_MEMORY_FUNCTIONS = frozenset(
+    {"memory_query", "memory_malware_scan", "memory_strings"}
+)
 DOMAIN_PCAP_FUNCTIONS = frozenset({"pcap_query"})
-#: Final functions that exist on the registry surface but are deliberately not
-#: offered on the interactive case palette, mirroring their predecessors:
-#: the host-side and inline functions read objects outside the case evidence
-#: chain, and bulk_extract was never palette-approved for the console.  The two
-#: recovery mediators join it: extraction-scoped like bulk_extract, they are
-#: offered on the registry surface but not auto-added to the console case palette.
-DOMAIN_OFF_PALETTE_FUNCTIONS = frozenset(
+#: Functions that exist on the registry surface and are deliberately offered by
+#: NO palette, each with the reason it is withheld.  This is the only permitted
+#: exception to the reachability guard at the foot of this module, and it is a
+#: mapping rather than a set so the exception costs a written sentence: a bare
+#: name here is indistinguishable from a tool somebody forgot to offer, which is
+#: the failure the guard exists to end.  An empty table is the ideal.
+#:
+#: This is NOT the quarantine table in ``core.tool_availability``.  That one
+#: names WITHDRAWN tools, which have no implementation left to reach; this one
+#: names tools that are implemented, buildable and callable, and are kept off
+#: every case palette on purpose.  The two are proven disjoint below.
+WITHHELD_FROM_EVERY_PALETTE: Mapping[str, str] = MappingProxyType(
     {
-        # It hashes a file on the HOST, which is not part of any case's evidence
-        # chain, so no case palette offers it.
-        "host_file_hash",
+        "host_file_hash": (
+            "it hashes a file on the HOST, which is no part of any case's "
+            "evidence chain; a case palette that offered it would let a digest "
+            "of something outside the chain be cited as if it were of the "
+            "evidence"
+        ),
     }
 )
+
+#: The names alone, for callers that only need membership.  Derived rather than
+#: restated so a reason cannot be dropped by editing one of two copies.
+DOMAIN_OFF_PALETTE_FUNCTIONS = frozenset(WITHHELD_FROM_EVERY_PALETTE)
 
 #: Functions that belong to every case, whatever it was opened with.
 #:
@@ -312,4 +334,137 @@ def tools_for_loaded_evidence(
         memory_available=bool(memory_path),
         pcap_available=bool(pcap_path) or pcap_sources is not None,
         include_quarantined_tools=include_quarantined_tools,
+    )
+# ---------------------------------------------------------------------------
+# Import-time proof that every implemented tool is REACHABLE.
+#
+# The declaration guard above compares the declared sets.  It cannot see a set
+# that is declared and then never consulted by the function body, and it cannot
+# see a tool that has no declaration at all — which is how ``memory_strings``
+# came to be classified, contracted and capability-granted while no palette had
+# ever offered it, and no run could call it.  A tool that exists in the code and
+# is offered to nobody is not a conservative default: it is a capability the
+# examination silently does not have, and every measurement taken over that
+# examination is short by it.
+#
+# So this half asks the palette FUNCTION, once per combination of evidence
+# types, and checks what it actually returns.  It sits at the foot of the module
+# because it calls the function it proves.
+# ---------------------------------------------------------------------------
+
+
+def reachable_functions() -> frozenset[str]:
+    """Every name a LIVE palette can hand a run, over all evidence combinations.
+
+    Derived by ASKING the palette rather than by unioning the declared sets: a
+    declaration the function body never consults offers nothing, and a union of
+    declarations would report it as offered.
+
+    The historical palette is excluded by construction — ``include_quarantined_tools``
+    is never passed here.  It records what past runs were offered and is not a
+    surface any run can select today, so counting it would let a tool no live
+    palette offers be reported as reachable on the strength of history.  If that
+    leaves a tool unreachable, the fix is a live palette entry, never a widened
+    historical record.
+    """
+
+    reach: set[str] = set()
+    for disk_available, disk_family, memory_available, pcap_available in product(
+        (True, False), get_args(DiskFamily), (True, False), (True, False)
+    ):
+        reach.update(
+            tools_for_evidence_sources(
+                disk_available=disk_available,
+                disk_family=disk_family,
+                memory_available=memory_available,
+                pcap_available=pcap_available,
+            )
+        )
+    return frozenset(reach)
+
+
+def unreachable_functions(
+    implemented: Collection[str] | None = None,
+    *,
+    reachable: Collection[str] | None = None,
+    withheld: Collection[str] | None = None,
+) -> frozenset[str]:
+    """Implemented tools that no live palette offers and nothing declares withheld.
+
+    The arguments exist so the rule can be exercised against a stated set rather
+    than only against the live one; a guard that can only ever be run on a
+    passing input is a guard nobody has seen work.
+    """
+
+    defined = frozenset(DOMAIN_FUNCTIONS if implemented is None else implemented)
+    offered = reachable_functions() if reachable is None else frozenset(reachable)
+    excused = frozenset(
+        WITHHELD_FROM_EVERY_PALETTE if withheld is None else withheld
+    )
+    return defined - offered - excused
+
+
+def unimplemented_palette_names(
+    reachable: Collection[str] | None = None,
+    *,
+    implemented: Collection[str] | None = None,
+) -> frozenset[str]:
+    """Names a palette offers that no registered function implements.
+
+    The reverse direction, so a rename cannot leave a palette pointing at
+    nothing: the run would build the surface, intersect it with the palette, and
+    quietly hand the model one function fewer than the palette promised.  The
+    navigation function is subtracted because it is deliberately not a domain
+    function — the guard above proves it must never become one — and it is
+    assembled by the model surface rather than by the registry.
+    """
+
+    offered = reachable_functions() if reachable is None else frozenset(reachable)
+    defined = frozenset(DOMAIN_FUNCTIONS if implemented is None else implemented)
+    return offered - defined - NAVIGATION_FUNCTIONS
+
+
+_UNREACHABLE = unreachable_functions()
+if _UNREACHABLE:
+    raise RuntimeError(
+        "these functions are implemented and no palette ever offers them, so no "
+        "run can call them: "
+        f"{sorted(_UNREACHABLE)}. Add each to the live palette of the evidence "
+        "it reads, or declare it in WITHHELD_FROM_EVERY_PALETTE with the reason "
+        "it is withheld."
+    )
+
+_UNIMPLEMENTED = unimplemented_palette_names()
+if _UNIMPLEMENTED:
+    raise RuntimeError(
+        "a palette offers these names and no registered function implements "
+        f"them: {sorted(_UNIMPLEMENTED)}. A palette that names nothing shrinks "
+        "the model surface silently, because the run intersects the palette with "
+        "what the registry built."
+    )
+
+_WITHHELD_WITHOUT_REASON = sorted(
+    name for name, reason in WITHHELD_FROM_EVERY_PALETTE.items() if not reason.strip()
+)
+if _WITHHELD_WITHOUT_REASON:
+    raise RuntimeError(
+        "a tool may be withheld from every palette only with a written reason: "
+        f"{_WITHHELD_WITHOUT_REASON}"
+    )
+
+_WITHHELD_BUT_UNDEFINED = sorted(frozenset(WITHHELD_FROM_EVERY_PALETTE) - frozenset(DOMAIN_FUNCTIONS))
+if _WITHHELD_BUT_UNDEFINED:
+    raise RuntimeError(
+        "these names are declared withheld from every palette but no function "
+        f"defines them: {_WITHHELD_BUT_UNDEFINED}. A withheld name that nothing "
+        "implements is a withdrawal, and belongs in the quarantine table instead."
+    )
+
+_WITHDRAWN_YET_DEFINED = sorted(QUARANTINED_MODEL_TOOL_NAMES & frozenset(DOMAIN_FUNCTIONS))
+if _WITHDRAWN_YET_DEFINED:
+    raise RuntimeError(
+        "these names are recorded as withdrawn from the default model surface "
+        f"and are also defined as domain functions: {_WITHDRAWN_YET_DEFINED}. "
+        "One of the two records is stale: a function the registry defines is "
+        "built and offered, so the quarantine entry must go."
     )

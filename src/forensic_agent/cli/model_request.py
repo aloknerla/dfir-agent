@@ -5,11 +5,12 @@ carries it, and both of them have to be made again for every question rather tha
 once at startup.
 
 The first is the set of controls the run is built under — which model, at which
-endpoint, how many steps it may take, how much reasoning it is asked for, and
-which Volatility material the host has. The reasoning effort in particular is
-read at the moment a runner is built, because ``/effort`` takes effect by
-discarding the cached runner: a value pinned when the console started would mean
-the operator's choice applied only after a restart.
+endpoint, how many steps and how much wall clock it may take, how much reasoning
+it is asked for, and which Volatility material the host has. The reasoning effort
+and the budgets are read at the moment a runner is built, because ``/reasoning``
+and ``/budget`` take effect by discarding the cached runner: a value pinned when
+the console started would mean the operator's choice applied only after a
+restart.
 
 The second is the framing wrapped around the question when earlier turns are
 carried into it. That framing is not phrasing but policy: it tells the model to
@@ -35,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import forensic_agent.cli.reasoning as _reasoning
+from forensic_agent.cli.budget import DEFAULT_MAX_WALL_TIME_S
 from forensic_agent.core.environ import scope_triage_enabled
 
 if TYPE_CHECKING:
@@ -103,8 +105,15 @@ def build_controlled_runner(
     output_root: Path,
     max_steps: int,
     max_tool_calls: int = 20,
+    max_wall_time_s: float = DEFAULT_MAX_WALL_TIME_S,
 ) -> ControlledInvestigationSession:
-    """Build the runner one interactive question executes under."""
+    """Build the runner one interactive question executes under.
+
+    ``max_wall_time_s`` is read at the moment the runner is built, for the same
+    reason the reasoning effort is: ``/budget time`` takes effect by discarding
+    the cached runner, so a clock pinned when the console started would apply
+    only after a restart.
+    """
 
     from forensic_agent.cli.controlled import ControlledInvestigationSession
 
@@ -160,6 +169,7 @@ def build_controlled_runner(
         base_url=base_url,
         api_key=api_key,
         output_root=output_root,
+        max_wall_time_s=float(max_wall_time_s),
         # Interactive use follows the selected provider's normal model
         # routing. Provider and precision pins are reserved for frozen
         # evaluation runs, whose callers pass them explicitly.
@@ -167,7 +177,7 @@ def build_controlled_runner(
         provider_quantizations=None,
         max_steps=max_steps,
         max_tool_calls=max_tool_calls,
-        # Read here rather than pinned at startup: /effort drops the
+        # Read here rather than pinned at startup: /reasoning drops the
         # cached runner, so the next question is built under whatever
         # the operator has chosen by then.
         reasoning_effort=_reasoning.current_effort(),

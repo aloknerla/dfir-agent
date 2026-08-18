@@ -24,7 +24,7 @@ of forensic logic implemented in-house is
 points at `forensic_agent.cli:main` and bypasses `__main__.py` entirely) calls
 `cli/app.py::main()`, which wraps `_run_cli()` in a terminal-background restore.
 `_run_cli()` parses arguments, restores the saved language (`cli/i18n.py`) and
-reasoning effort (`cli/reasoning.py`), resolves or runs provider setup
+reasoning level (`cli/reasoning.py`), resolves or runs provider setup
 (`cli/setup.py`), constructs `cli/app.py::Session` — a subclass of
 `cli/session.py::InteractiveSession` with the facade console injected — and enters
 `cli/terminal.py::run_shell()`, the command loop.
@@ -40,7 +40,14 @@ the exchange heading, optionally prints an evidence triage line from
 configuration — a `cli/controlled.py::ControlledInvestigationSession` through
 `cli/model_request.py::build_controlled_runner()`. The console's defaults are
 `max_steps=20`, `max_tool_calls=20`, `max_model_requests=23`,
-`max_wall_time_s=900.0` (`cli/controlled.py`).
+`max_wall_time_s=900.0` (`cli/controlled.py`). The step, tool-call and
+wall-clock ceilings are the operator's to change: `/budget` sets them, they are
+saved through `cli/budget.py`, and each setter drops the cached runner so the
+next question is built under the new value. `cli/budget.py` restates the
+wall-clock default as `DEFAULT_MAX_WALL_TIME_S`, which
+`tests/test_execution_budget_preparation.py` pins to the runner's own default.
+The reasoning level is not one of these: it is read per runner build from
+`cli/reasoning.py` and set by `/reasoning`.
 
 `InteractiveSession.ask()` then calls `ControlledInvestigationSession.ask()`
 with the question (prefixed by conversation context through

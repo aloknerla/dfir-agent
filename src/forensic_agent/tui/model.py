@@ -610,6 +610,10 @@ class StatusState:
     evidence_sources: tuple[str, ...]  # e.g. ("disk: laptop.E01", "memory: mem.raw")
     max_steps: int
     max_tool_calls: int
+    #: Seconds of wall clock one message may spend. No default: a status this
+    #: console shows must state the clock it actually runs under, and a
+    #: fallback here would be a fourth place the number lives.
+    max_wall_time_s: int
     max_model_requests: int
     reasoning_effort: str
 

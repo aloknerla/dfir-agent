@@ -65,7 +65,10 @@ from forensic_agent.agent.tool_bindings.disk import (
     _build_disk_content_search_tools,
     _build_disk_core_tools,
 )
-from forensic_agent.agent.tool_bindings.memory import _build_memory_tools
+from forensic_agent.agent.tool_bindings.memory import (
+    _build_memory_string_search_tools,
+    _build_memory_tools,
+)
 from forensic_agent.agent.tool_bindings.pcap import _build_pcap_tools
 from forensic_agent.agent.tool_bindings.reference import (
     _build_hardware_vendor_tools,
@@ -334,6 +337,9 @@ def build_legacy_index(context: ToolBuildContext) -> LegacyToolIndex:
         collect(_build_windows_tools)
     if context.memory_path:
         collect(_build_memory_tools)
+        # Collected here and nowhere else, like the two whole-image searches:
+        # the recorded palette is rebuilt from the segment above alone.
+        collect(_build_memory_string_search_tools)
     if disk is not None or context.memory_path:
         # The implementation behind the raw-image feature scan, collected on the
         # same condition the facade offers it.
@@ -776,6 +782,9 @@ _DISPATCH_TABLE: Mapping[str, Mapping[str, OperationDispatch | OperationExecutio
                         "memory_malware_scan", scope="all_candidates", pid=None
                     ),
                 }
+            ),
+            "memory_strings": MappingProxyType(
+                {"pattern_hits": _dispatch("memory_strings")}
             ),
             "pcap_query": MappingProxyType(
                 {operation: _pcap_dispatch(operation) for operation in _PCAP_OPERATIONS}

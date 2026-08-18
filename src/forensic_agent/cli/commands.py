@@ -481,22 +481,43 @@ COMMANDS: tuple[CommandSpec, ...] = (
             "of them can render a colour that is unreadable on its ground."
         ),
     ),
-    # One command for one subject. /reasoning and /budget opened the same
-    # screen and governed the same thing — how much work one message is
-    # allowed to spend — so they are a single command named for that subject
-    # rather than for two halves of it.
+    # Two subjects, two commands. These were merged into one /effort on the
+    # reading that reasoning and the budgets both answer "how much work may
+    # one message spend". They do not. The reasoning level is a property of
+    # how the model thinks and is sent to the provider with every request;
+    # the budgets are ceilings this console places on the resources a run may
+    # consume, and an exhausted one ends the run with no finding at all. An
+    # operator who wants a longer clock is not asking the model to think
+    # harder, so they are no longer made to type a command named for that.
     CommandSpec(
-        "effort",
-        "Show and set how much work one message may spend: the model's "
-        "reasoning effort and the step and tool-call limits.",
+        "reasoning",
+        "Show or set how much reasoning the model spends per request.",
         CommandCategory.SYSTEM,
-        "/effort [none|low|medium|high|steps N|toolcalls N]",
+        "/reasoning [none|low|medium|high]",
         detail=(
-            "A bare /effort opens the effort screen: pick a row and Enter "
-            "edits it. The levels none, low, medium and high set how much "
+            "A bare /reasoning opens the level chooser and marks the active "
+            "one. The levels none, low, medium and high set how much "
             "reasoning the model spends per request, and none omits reasoning "
-            "entirely. /effort steps 30 and /effort toolcalls 30 set a limit "
-            "without the screen."
+            "entirely. It applies to the next message. This is the console "
+            "control only; the DFA_REASONING_EFFORT environment variable sets "
+            "the same level for a non-interactive run."
+        ),
+    ),
+    CommandSpec(
+        "budget",
+        "Show and set the limits one message may spend: time, steps and "
+        "tool calls.",
+        CommandCategory.SYSTEM,
+        "/budget [time S|steps N|toolcalls N]",
+        detail=(
+            "A bare /budget opens the budget screen: pick a row and Enter "
+            "edits it. /budget time 600 sets the per-message wall clock in "
+            "seconds, /budget steps 30 the investigation steps and "
+            "/budget toolcalls 30 the tool calls, each without the screen. "
+            "Every one of them is a whole number of at least 1, takes effect "
+            "on the next message, and is kept for the next launch. A message "
+            "that exhausts one of these ends there, so a run that keeps "
+            "stopping without a finding is asking for a larger budget."
         ),
     ),
 )

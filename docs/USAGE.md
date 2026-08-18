@@ -89,4 +89,5 @@ because only the first is the gate stopping a call.
 | `/doctor` | Check the model connection and forensic dependencies. |
 | `/language [en\|hr]` | Show or switch the terminal language (English or Croatian). |
 | `/theme [name]` | Show or switch the console colour theme; bare `/theme` lists the shipped themes and marks the active one, and the choice is kept for the next launch. |
-| `/effort [none\|low\|medium\|high\|steps N\|toolcalls N]` | Show and set how much work one question may spend: the model's reasoning effort and the step and tool-call limits. Bare `/effort` opens the screen; a level sets the effort, `steps N` or `toolcalls N` sets a limit. |
+| `/reasoning [none\|low\|medium\|high]` | Show or set how much reasoning the model spends per request. Bare `/reasoning` opens the level chooser and marks the active one; a level sets it for the next question. The `DFA_REASONING_EFFORT` environment variable sets the same level for a non-interactive run. |
+| `/budget [time S\|steps N\|toolcalls N]` | Show and set the limits one question may spend: the wall clock in seconds, the investigation steps and the tool calls. Bare `/budget` opens the screen; `time 600`, `steps 30` or `toolcalls 30` sets one directly. Each is a whole number of at least 1, applies to the next question, and is kept for the next launch. |

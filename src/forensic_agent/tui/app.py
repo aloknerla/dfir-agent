@@ -1522,15 +1522,30 @@ class ContextScreen(ModalScreen[tuple[str, str] | None]):
         self.dismiss(None)
 
 
-class EffortScreen(ModalScreen[None]):
-    """How much work the next message may spend, edited where it is shown.
+class BudgetScreen(ModalScreen[None]):
+    """The resources one message may spend, edited where they are shown.
 
-    Three rows, steps, tool calls and reasoning effort, and Enter opens the
-    matching editor; the fixed model-request ceiling is stated beneath. This
-    is the one surface for all of it, reached by the one command that names
-    it: /effort, and the budgets are its arguments rather than commands of
-    their own.
+    Three rows — time, steps and tool calls — and Enter opens the matching
+    editor; the fixed model-request ceiling is stated beneath. Nothing about
+    the model's reasoning appears here: that is a property of how the model
+    thinks rather than a ceiling on what a run may consume, and it has its own
+    command. Every row is a limit that ends a run with no finding when it is
+    reached, which is what makes them one screen.
     """
+
+    #: (row id, label, session setter, what the editor asks for). The order is
+    #: the order on screen, and the index the editor works from, so a row can
+    #: be added or moved here alone.
+    ROWS: ClassVar[tuple[tuple[str, str, str, str], ...]] = (
+        ("budget-time", "time", "change_time", "seconds per message"),
+        ("budget-steps", "steps", "change_steps", "steps per message"),
+        (
+            "budget-toolcalls",
+            "tool calls",
+            "change_tool_calls",
+            "tool calls per message",
+        ),
+    )
 
     BINDINGS = [
         Binding("escape", "dismiss", "close"),
@@ -1539,31 +1554,50 @@ class EffortScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         box_ = Vertical(id="choice-box")
-        box_.border_title = "limits for the next message"
+        box_.border_title = "budget for the next message"
         box_.border_subtitle = "Enter edits   esc closes"
         with box_:
             yield ListView(
-                ListItem(Label(""), id="effort-steps"),
-                ListItem(Label(""), id="effort-toolcalls"),
-                ListItem(Label(""), id="effort-reasoning"),
-                id="effort-list",
+                *(ListItem(Label(""), id=row[0]) for row in self.ROWS),
+                id="budget-list",
             )
-            yield Static("", id="effort-note")
+            yield Static("", id="budget-note")
 
     def on_mount(self) -> None:
         self.refresh_rows()
-        view = self.query_one("#effort-list", ListView)
+        view = self.query_one("#budget-list", ListView)
         view.focus()
         view.index = 0
 
+    @staticmethod
+    def _settings(status) -> tuple[int, int, int]:
+        """The three limits as the commands take them, in row order.
+
+        One tuple, read by both the drawing and the editor, so a row cannot
+        end up showing one budget and editing another.
+        """
+
+        return (status.max_wall_time_s, status.max_steps, status.max_tool_calls)
+
+    @classmethod
+    def _row_values(cls, status) -> tuple[str, ...]:
+        """The same three limits as the operator reads them.
+
+        The clock is shown as a duration rather than as a seconds count: 900
+        is a number the operator has to divide by sixty before it means
+        anything, and every other duration in this console is already written
+        the same way.
+        """
+
+        seconds, steps, tool_calls = cls._settings(status)
+        return (format_duration(seconds), str(steps), str(tool_calls))
+
     def refresh_rows(self) -> None:
         status = self.app._controller.status()  # type: ignore[attr-defined]
-        rows = (
-            ("effort-steps", "steps", str(status.max_steps)),
-            ("effort-toolcalls", "tool calls", str(status.max_tool_calls)),
-            ("effort-reasoning", "reasoning effort", status.reasoning_effort),
-        )
-        for item_id, label, value in rows:
+        values = self._row_values(status)
+        for (item_id, label, _setter, _asks), value in zip(
+            self.ROWS, values, strict=True
+        ):
             text = Text()
             text.append(f"{label:>18}  ", style=M.DIM)
             text.append(value, style=f"bold {M.ACCENT}")
@@ -1576,66 +1610,45 @@ class EffortScreen(ModalScreen[None]):
         note = Text()
         note.append(f"{'model requests':>18}  ", style=M.DIM)
         note.append(str(status.max_model_requests), style=M.DIM_BRIGHT)
-        self.query_one("#effort-note", Static).update(note)
+        self.query_one("#budget-note", Static).update(note)
 
-    @on(ListView.Selected, "#effort-list")
+    @on(ListView.Selected, "#budget-list")
     def _picked(self, event: ListView.Selected) -> None:
         event.stop()
-        index = self.query_one("#effort-list", ListView).index
+        index = self.query_one("#budget-list", ListView).index
         self.app.run_worker(self._edit(index), exclusive=False)
 
     async def _edit(self, index: int | None) -> None:
         app = self.app
         if app._controller.is_demo:  # type: ignore[attr-defined]
-            app.notify("Not available in demo mode.", title="/effort")
+            app.notify("Not available in demo mode.", title="/budget")
             return
         if app.running:  # type: ignore[attr-defined]
             app.notify(
                 "A message is being investigated. Ctrl+C cancels it first.",
-                title="/effort",
+                title="/budget",
                 severity="warning",
             )
             return
+        if index is None or not 0 <= index < len(self.ROWS):
+            return
         status = app._controller.status()  # type: ignore[attr-defined]
-        if index in (0, 1):
-            label = "steps" if index == 0 else "toolcalls"
-            current = status.max_steps if index == 0 else status.max_tool_calls
-            value = await app.push_screen_wait(
-                PromptScreen(
-                    "steps per message" if index == 0 else "tool calls per message",
-                    hint="A whole number of at least 1; it applies to your next message.",
-                    value=str(current),
-                )
+        _item_id, label, setter, asks = self.ROWS[index]
+        # The editor takes the raw number the command takes, seconds included:
+        # the row above it reads "15m 00s", but what is typed here is what
+        # /budget time takes, and an editor that accepted a different spelling
+        # from the command would be a second grammar for one setting.
+        current = self._settings(status)[index]
+        value = await app.push_screen_wait(
+            PromptScreen(
+                asks,
+                hint="A whole number of at least 1; it applies to your next message.",
+                value=str(current),
             )
-            if value is None or not value.strip():
-                return
-            app._set_limit(  # type: ignore[attr-defined]
-                "change_steps" if index == 0 else "change_tool_calls",
-                label,
-                value.strip(),
-            )
-        elif index == 2:
-            from forensic_agent.cli.reasoning import REASONING_EFFORTS
-
-            options = list(REASONING_EFFORTS)
-            marked = [
-                option
-                + ("   ● active" if option == status.reasoning_effort else "")
-                for option in options
-            ]
-            current = (
-                options.index(status.reasoning_effort)
-                if status.reasoning_effort in options
-                else 0
-            )
-            pick = await app.push_screen_wait(
-                ChoiceScreen(
-                    "reasoning effort for the next message", marked, initial=current
-                )
-            )
-            if pick is None:
-                return
-            app._set_reasoning(options[pick])  # type: ignore[attr-defined]
+        )
+        if value is None or not value.strip():
+            return
+        app._set_limit(setter, label, value.strip())  # type: ignore[attr-defined]
         self.refresh_rows()
 
 
@@ -2233,7 +2246,7 @@ class InvestigationApp(App):
     }
 
     OverlayScreen, ChoiceScreen, ReviewScreen, PromptScreen, ContextScreen,
-    FileBrowserScreen, EffortScreen { align: center middle; background: $dfir-scrim 60%; }
+    FileBrowserScreen, BudgetScreen { align: center middle; background: $dfir-scrim 60%; }
     #browse-box {
         width: 100; max-width: 95%;
         height: 80%;
@@ -2267,8 +2280,8 @@ class InvestigationApp(App):
     }
     #prompt-entry:focus, #context-entry:focus { border: round $accent; }
     .modal-hint { margin: 0 0 1 0; }
-    #effort-list { height: auto; }
-    #effort-note { margin: 1 0 0 1; }
+    #budget-list { height: auto; }
+    #budget-note { margin: 1 0 0 1; }
     #activity .pane-hint, #evidence-pane .pane-hint,
     #guardrails-pane .pane-hint {
         height: 100%;
@@ -2347,8 +2360,8 @@ class InvestigationApp(App):
     #: Commands a palette pick must NOT run, because their bare form has no
     #: meaning and the value can only be typed. Empty, and measured to be: every
     #: command in the registry answers a bare call with something the operator
-    #: can act on — a chooser (/theme, /model, /language, /layout, /effort,
-    #: /resume), a chooser followed by a file browser (/attach, /case), or a
+    #: can act on — a chooser (/theme, /model, /language, /layout, /reasoning,
+    #: /budget, /resume), a chooser followed by a file browser (/attach, /case), or a
     #: listing (/tools, /findings, /oversight, /history, /context). A command
     #: added later that genuinely needs free text belongs here, and
     #: tests/test_tui_console.py asserts every name in it is a real command.
@@ -2914,7 +2927,7 @@ class InvestigationApp(App):
 
         row("model", Text((status.model or "—"), style=f"bold {M.ACCENT}"), "/model")
         row("provider", Text(status.provider, style=M.TEXT))
-        row("effort", Text(status.reasoning_effort, style=M.TEXT), "/effort")
+        row("reasoning", Text(status.reasoning_effort, style=M.TEXT), "/reasoning")
         # No "layout" row. This panel says what the CASE is — the evidence, the
         # model that will read it, the budget it may spend. How the console
         # arranges itself on screen is a display preference and belongs with
@@ -3094,7 +3107,7 @@ class InvestigationApp(App):
         """Move the cursor through the list and scroll it into view.
 
         Stops at the ends rather than wrapping, which is what every other list
-        in this console does — the effort rows, the evidence list, the choosers
+        in this console does — the budget rows, the evidence list, the choosers
         are all Textual lists, and none of them wraps.
 
         Cheap by construction: the matches are already held, so this is one
@@ -3205,13 +3218,13 @@ class InvestigationApp(App):
         """A palette pick RUNS the command. The palette is a menu, not a hint.
 
         The bare form of every argument-taking command in this console is
-        already the menu for it: /theme, /model, /language, /layout, /effort
-        and /resume open a chooser, /attach and /case open a chooser and then a
-        file browser, /tools and /findings and /oversight and /history open the
-        listing the argument narrows. So running the bare form on a pick is
-        what puts the operator in front of the values they were going to type,
-        which is both quicker and safer than spelling a path or a model id out
-        by hand.
+        already the menu for it: /theme, /model, /language, /layout,
+        /reasoning, /budget and /resume open a chooser, /attach and /case open
+        a chooser and then a file browser, /tools and /findings and /oversight
+        and /history open the listing the argument narrows. So running the
+        bare form on a pick is what puts the operator in front of the values
+        they were going to type, which is both quicker and safer than spelling
+        a path or a model id out by hand.
 
         This replaced a version that inserted the name and only notified, on
         the theory that running a command with an argument would strand the
@@ -3309,13 +3322,14 @@ class InvestigationApp(App):
     #: start work of its own, and may not touch the evidence. What is left is
     #: reading already-recorded state and setting the console's own
     #: appearance, neither of which the running thread can notice.
-    #: /effort belongs here for a further reason: a cancelled run's
-    #: winding-down thread holds its OWN runner reference, so changing the
-    #: default for the NEXT question never touches the orphan — and without
-    #: this, the operator who just pressed Ctrl+C is told to press Ctrl+C.
+    #: /reasoning and /budget belong here for a further reason: a cancelled
+    #: run's winding-down thread holds its OWN runner reference, so changing
+    #: the default for the NEXT question never touches the orphan — and
+    #: without this, the operator who just pressed Ctrl+C is told to press
+    #: Ctrl+C.
     _SAFE_WHILE_RUNNING = {
+        "budget",
         "clear",
-        "effort",
         "findings",
         "help",
         "history",
@@ -3323,6 +3337,7 @@ class InvestigationApp(App):
         "layout",
         "oversight",
         "quit",
+        "reasoning",
         "sources",
         "status",
         "theme",
@@ -3553,80 +3568,135 @@ class InvestigationApp(App):
         # writes. A location nobody can visit is not a fact worth a row.
         return grid
 
-    _EFFORT_LIMITS: ClassVar[dict[str, tuple[str, str]]] = {
-        "steps": ("change_steps", "steps"),
-        "toolcalls": ("change_tool_calls", "toolcalls"),
+    #: The budgets /budget sets, as argument name → session setter. Every one
+    #: of them is a ceiling that ends a run when it is reached; the reasoning
+    #: level is not one of them and lives under /reasoning.
+    _BUDGET_LIMITS: ClassVar[dict[str, str]] = {
+        "time": "change_time",
+        "steps": "change_steps",
+        "toolcalls": "change_tool_calls",
     }
 
-    _EFFORT_USAGE = "Usage: /effort [none|low|medium|high|steps N|toolcalls N]"
+    _BUDGET_USAGE = "Usage: /budget [time S|steps N|toolcalls N]"
 
-    def _cmd_effort(self, argument: str = "") -> None:
-        """One command for how much work a message may spend.
+    def _cmd_reasoning(self, argument: str = "") -> None:
+        """How much reasoning the model spends on one request, and nothing else.
 
-        The reasoning effort and the step and tool-call limits govern the same
-        thing from two sides, and they were two commands opening one screen.
-        The screen is the same, one command names it, and the budgets are
-        arguments to that command (/effort steps 30) rather than commands of
-        their own; a level name sets the reasoning effort without the screen.
+        Split back out of /effort, which had merged it with the budgets on the
+        reading that both governed how much work a message may spend. The
+        levels here change how the model thinks and travel to the provider
+        with every request; the budgets are ceilings this console places on a
+        run and end it when they are reached. The environment variable
+        DFA_REASONING_EFFORT is untouched by the rename — only the command is
+        this console's to name.
         """
 
-        from forensic_agent.cli.reasoning import normalize_effort
+        from forensic_agent.cli.reasoning import REASONING_EFFORTS, normalize_effort
 
         text = argument.strip()
         if not text:
-            self.push_screen(EffortScreen())
+            self._reasoning_chooser()
+            return
+        first = text.split(None, 1)[0]
+        try:
+            # The same spellings the setting itself accepts, so "off" and
+            # "none" cannot mean different things in the two places.
+            level = normalize_effort(first)
+        except ValueError:
+            self._unrecognised("reasoning", first, REASONING_EFFORTS)
+            return
+        self._set_reasoning(level)
+
+    @work
+    async def _reasoning_chooser(self) -> None:
+        """The four levels, the active one marked and under the cursor.
+
+        The same shape as every other fixed-set chooser in this console, and
+        the same one the merged screen used for its reasoning row.
+        """
+
+        from forensic_agent.cli.reasoning import REASONING_EFFORTS
+
+        if self._demo_blocked("reasoning"):
+            return
+        status = self._controller.status()
+        options = list(REASONING_EFFORTS)
+        marked = [
+            option + ("   ● active" if option == status.reasoning_effort else "")
+            for option in options
+        ]
+        initial = (
+            options.index(status.reasoning_effort)
+            if status.reasoning_effort in options
+            else 0
+        )
+        pick = await self.push_screen_wait(
+            ChoiceScreen("reasoning for the next message", marked, initial=initial)
+        )
+        if pick is None:
+            return
+        self._set_reasoning(options[pick])
+
+    def _cmd_budget(self, argument: str = "") -> None:
+        """The resources one message may spend: its clock, its steps, its calls.
+
+        Three ceilings and one command, because reaching any of them ends the
+        run the same way — with no finding. The clock is the one that had no
+        console control at all until now: a run that stopped on
+        budget_exhausted:max_wall_time_s could only be given more time by
+        relaunching, which is exactly the case the operator is least able to
+        wait for.
+        """
+
+        text = argument.strip()
+        if not text:
+            self.push_screen(BudgetScreen())
             return
         parts = text.split(None, 1)
         target = parts[0].casefold()
         value = parts[1].strip() if len(parts) == 2 else ""
-        if target in self._EFFORT_LIMITS:
-            if not value:
-                self.push_screen(EffortScreen())
-                return
-            method, label = self._EFFORT_LIMITS[target]
-            self._set_limit(method, label, value)
-            return
-        try:
-            # The same spellings the setting itself accepts, so "off" and
-            # "none" cannot mean different things in the two places.
-            level = normalize_effort(target)
-        except ValueError:
-            from forensic_agent.cli.reasoning import REASONING_EFFORTS
-
+        if target not in self._BUDGET_LIMITS:
             self._unrecognised(
-                "effort",
-                parts[0],
-                (*REASONING_EFFORTS, "steps N", "toolcalls N"),
+                "budget", parts[0], ("time S", "steps N", "toolcalls N")
             )
             return
-        self._set_reasoning(level)
+        if not value:
+            self.push_screen(BudgetScreen())
+            return
+        self._set_limit(self._BUDGET_LIMITS[target], target, value)
 
     def _set_limit(self, method: str, label: str, argument: str) -> None:
         if self._controller.is_demo:
-            self.notify("Not available in demo mode.", title=f"/{label}")
+            self.notify("Not available in demo mode.", title="/budget")
             return
         if self.running:
             self.notify(
                 "A message is being investigated. Ctrl+C cancels it first.",
-                title="/effort",
+                title="/budget",
                 severity="warning",
             )
             return
-        if not argument.strip().isdigit():
-            self.notify(self._EFFORT_USAGE, title="/effort")
+        # Refused here rather than passed on: zero and negative numbers are
+        # the shapes an operator reaches for when they mean "no limit", and a
+        # budget of zero is a run that cannot take its first step. isdigit()
+        # alone let "0" through to the session, which refused it in the
+        # transcript the console does not show for this command.
+        cleaned = argument.strip()
+        if not cleaned.isdigit() or int(cleaned) < 1:
+            self.notify(self._BUDGET_USAGE, title="/budget")
             return
         # The session's own setter validates, saves the new default, and drops
         # the cached runner: a limit set on the attribute alone would leave
         # the next message running under the old one.
         with self._recording() as recorder:
             try:
-                getattr(self._controller.session, method)(argument.strip())
+                getattr(self._controller.session, method)(cleaned)
             except Exception as exc:
-                self.notify(str(exc)[:240], severity="error", title=f"/{label}")
+                self.notify(str(exc)[:240], severity="error", title="/budget")
                 return
         self._refresh_session_panel()
         note = " ".join(recorder.export_text(styles=False).split())
-        self.notify(note[:240] or "Limit updated.", title=f"/{label}")
+        self.notify(note[:240] or f"{label} budget updated.", title="/budget")
 
     def _cmd_new(self, argument: str = "") -> None:
         """Start a fresh investigation history, and clear what belonged to the
@@ -4061,7 +4131,7 @@ class InvestigationApp(App):
     @work
     async def _layout_chooser(self) -> None:
         """Both layouts by name, each with what it is for, and the active one
-        marked and under the cursor — the same shape as the effort chooser."""
+        marked and under the cursor — the same shape as the reasoning chooser."""
 
         names = tuple(name for name, _what in self.LAYOUTS)
         options = [
@@ -4238,12 +4308,12 @@ class InvestigationApp(App):
         return Group(*rows)
 
     def _set_reasoning(self, level: str) -> None:
-        if self._demo_blocked("effort"):
+        if self._demo_blocked("reasoning"):
             return
         if self.running:
             self.notify(
                 "A message is being investigated. Ctrl+C cancels it first.",
-                title="/effort",
+                title="/reasoning",
                 severity="warning",
             )
             return
@@ -4251,11 +4321,11 @@ class InvestigationApp(App):
             try:
                 self._controller.session.change_reasoning(level)
             except Exception as exc:
-                self.notify(str(exc)[:240], severity="error", title="/effort")
+                self.notify(str(exc)[:240], severity="error", title="/reasoning")
                 return
         self._refresh_session_panel()
         note = " ".join(recorder.export_text(styles=False).split())
-        self.notify(note[:240] or "Reasoning effort updated.", title="/effort")
+        self.notify(note[:240] or "Reasoning updated.", title="/reasoning")
 
     def _cmd_findings(self, argument: str = "") -> None:
         # A bare /findings is the standardized findings list of the last run,
@@ -7456,9 +7526,10 @@ class InvestigationApp(App):
         run.add_column(style=M.TEXT)
         status = self._status
         run.add_row("model", f"{status.model}  {status.provider}")
-        run.add_row("effort", status.reasoning_effort)
+        run.add_row("reasoning", status.reasoning_effort)
         run.add_row(
             "limits per message",
+            f"{format_duration(status.max_wall_time_s)}   "
             f"{status.max_steps} steps   {status.max_tool_calls} tool-calls   "
             f"{status.max_model_requests} model-requests",
         )

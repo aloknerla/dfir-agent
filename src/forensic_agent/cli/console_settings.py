@@ -121,7 +121,7 @@ def change_reasoning(
         # rather than dressing a shape mistake as a fault.
         choices = "|".join(_reasoning.REASONING_EFFORTS)
         console.print(
-            build_usage_renderable("effort", usage=f"/effort [{choices}]")
+            build_usage_renderable("reasoning", usage=f"/reasoning [{choices}]")
         )
         return
 

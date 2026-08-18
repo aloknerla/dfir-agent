@@ -386,12 +386,6 @@ _QUARANTINED: tuple[QuarantinedModelTool, ...] = (
         "machine SID that samparse never stated",
     ),
     QuarantinedModelTool(
-        "memory_strings",
-        SCOPE_MEMORY,
-        "our own scanner presented beside Volatility plugin output, with a "
-        "ranking claim about paging and no truncation flag",
-    ),
-    QuarantinedModelTool(
         "reconstruct_http_exfil",
         SCOPE_PCAP,
         "trial-decrypts RC4 keys until the plaintext looks right, which is an "
@@ -402,6 +396,20 @@ _QUARANTINED: tuple[QuarantinedModelTool, ...] = (
         SCOPE_ALWAYS,
         "takes an arbitrary HOST path with no containment root and duplicates "
         "the in-image read",
+    ),
+    # Not a withdrawal but a name that was never a tool.  It is carried by the
+    # taxonomy, the result-contract data types, the capability map and the
+    # classifier, and no binding was ever written for it: no module in this
+    # repository has ever defined it, so no surface could offer it and no run
+    # could call it.  Recorded here because the alternative is deleting four
+    # entries and leaving nothing that says the capability was ever intended;
+    # an absence nothing states is exactly how this one survived unnoticed.
+    QuarantinedModelTool(
+        "vision_read",
+        SCOPE_ALWAYS,
+        "declared across the tool tables but never implemented: no binding "
+        "for it exists, so it has never been callable. Text recognition over "
+        "an image is served by ocr_image, which is implemented and offered",
     ),
 )
 

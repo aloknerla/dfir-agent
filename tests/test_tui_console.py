@@ -16,7 +16,7 @@ pytest.importorskip("textual")
 
 from rich.text import Text  # noqa: E402
 from textual.containers import VerticalScroll  # noqa: E402
-from textual.widgets import ListView, Static  # noqa: E402
+from textual.widgets import Label, ListItem, ListView, Static  # noqa: E402
 
 from forensic_agent.cli.commands import COMMAND_REGISTRY  # noqa: E402
 from forensic_agent.tui import build_app  # noqa: E402
@@ -269,6 +269,7 @@ class _FakeSession:
         self.max_tool_calls = 20
         self.steps_changed: list[str] = []
         self.tool_calls_changed: list[str] = []
+        self.time_changed: list[str] = []
         self.reasoning_changed: list[str] = []
         self.resumed: list[str] = []
         self.context_set: list[str] = []
@@ -307,6 +308,10 @@ class _FakeSession:
     def change_tool_calls(self, argument):
         self.tool_calls_changed.append(argument)
         self._console.print(f"Tool calls per message: {argument}")
+
+    def change_time(self, argument):
+        self.time_changed.append(argument)
+        self._console.print(f"Time budget (s): {argument}")
 
     def change_reasoning(self, level):
         self.reasoning_changed.append(level)
@@ -348,6 +353,7 @@ class _FakeLiveController:
             evidence_sources=("disk: image.E01",),
             max_steps=20,
             max_tool_calls=20,
+            max_wall_time_s=900,
             max_model_requests=24,
             reasoning_effort="high",
         )
@@ -397,7 +403,7 @@ def test_live_command_flows_reach_the_session():
 
             # The typed limit form goes through the session's own setter
             # (runner drop + persistence live there), never a bare setattr.
-            app.dispatch_command("effort", "steps 30")
+            app.dispatch_command("budget", "steps 30")
             await pilot.pause(0.1)
             assert session.steps_changed == ["30"]
 
@@ -445,40 +451,126 @@ def test_live_command_flows_reach_the_session():
     asyncio.run(scenario())
 
 
-def test_effort_screen_edits_reach_the_session():
-    """Bare /effort is the one surface for all of it: Enter on a row edits it."""
+def test_budget_screen_edits_reach_the_session():
+    """Bare /budget is the surface for the three ceilings: Enter on a row edits it.
+
+    The first row is the per-message wall clock, which had no console control
+    at all before: a run that ended on ``budget_exhausted:max_wall_time_s``
+    could only be given more time by relaunching.
+    """
 
     async def scenario():
-        from forensic_agent.tui.app import EffortScreen, PromptScreen
+        from forensic_agent.tui.app import BudgetScreen, PromptScreen
 
         app = build_app(_FakeLiveController())
         async with app.run_test(size=(120, 40)) as pilot:
-            app.dispatch_command("effort", "")
+            app.dispatch_command("budget", "")
             await pilot.pause(0.2)
-            assert isinstance(app.screen, EffortScreen)
-            await pilot.press("enter")  # first row: steps
+            assert isinstance(app.screen, BudgetScreen)
+            # The clock is shown as a duration, not as a bare seconds count.
+            rows = app.screen.query_one("#budget-list")
+            drawn = " ".join(
+                str(item.query_one(Label).visual) for item in rows.query(ListItem)
+            )
+            assert "15m 00s" in drawn
+            assert "reasoning" not in drawn  # the level is not a budget
+            await pilot.press("enter")  # first row: time
             await pilot.pause(0.2)
             assert isinstance(app.screen, PromptScreen)
-            app.screen.query_one("#prompt-entry").value = "25"
+            app.screen.query_one("#prompt-entry").value = "600"
             await pilot.press("enter")
             await pilot.pause(0.3)
-            assert app._controller.session.steps_changed == ["25"]
-            assert isinstance(app.screen, EffortScreen)
+            assert app._controller.session.time_changed == ["600"]
+            assert isinstance(app.screen, BudgetScreen)
             await pilot.press("escape")
             await pilot.pause(0.1)
 
     asyncio.run(scenario())
 
 
-def test_effort_takes_a_reasoning_level_directly():
-    """/effort high is the merged command's other half: one name, both dials."""
+def test_budget_time_sets_the_wall_clock_for_the_next_message():
+    """/budget time 600 is the typed form, down the session's own setter."""
 
     async def scenario():
         app = build_app(_FakeLiveController())
         async with app.run_test(size=(120, 40)) as pilot:
-            app.dispatch_command("effort", "low")
+            app._handle_slash("/budget time 600")
             await pilot.pause(0.1)
-            assert app._controller.session.reasoning_changed == ["low"]
+            assert app._controller.session.time_changed == ["600"]
+            # And nothing about the reasoning level moved with it.
+            assert app._controller.session.reasoning_changed == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("refused", ["0", "-5", "abc", "12.5"])
+def test_a_nonsense_time_budget_is_refused_and_nothing_is_set(refused):
+    """Zero, negative and non-numeric are shape mistakes, answered with the form.
+
+    Zero especially: it is what an operator types when they mean "no limit",
+    and a run allowed zero seconds cannot take its first step.
+    """
+
+    async def scenario():
+        app = build_app(_FakeLiveController())
+        async with app.run_test(size=(120, 40)) as pilot:
+            notices: list[str] = []
+            app.notify = lambda message, **kw: notices.append(str(message))
+            app._handle_slash(f"/budget time {refused}")
+            await pilot.pause(0.1)
+            assert app._controller.session.time_changed == []
+            assert notices and "/budget [time S" in notices[-1]
+
+    asyncio.run(scenario())
+
+
+def test_reasoning_takes_a_level_and_offers_no_budgets():
+    """/reasoning is the level and only the level."""
+
+    async def scenario():
+        app = build_app(_FakeLiveController())
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.dispatch_command("reasoning", "high")
+            await pilot.pause(0.1)
+            session = app._controller.session
+            assert session.reasoning_changed == ["high"]
+            # A budget word is not a reasoning level, and is refused by name
+            # rather than being quietly taken as one.
+            notices: list[str] = []
+            app.notify = lambda message, **kw: notices.append(str(message))
+            app.dispatch_command("reasoning", "steps 30")
+            await pilot.pause(0.1)
+            assert session.steps_changed == []
+            assert session.reasoning_changed == ["high"]
+            assert "steps" in notices[-1] and "none" in notices[-1]
+
+    asyncio.run(scenario())
+
+
+def test_bare_reasoning_opens_the_level_chooser_and_the_pick_applies():
+    """The bare form is the menu, as it is for every fixed-set command here.
+
+    The chooser opens on the level in force, so moving off it and confirming
+    is what proves the pick — not the cursor — decides.
+    """
+
+    from forensic_agent.cli.reasoning import REASONING_EFFORTS
+
+    async def scenario():
+        from forensic_agent.tui.app import ChoiceScreen
+
+        app = build_app(_FakeLiveController())
+        async with app.run_test(size=(120, 40)) as pilot:
+            active = app._controller.status().reasoning_effort
+            assert active == "high"
+            app.dispatch_command("reasoning", "")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, ChoiceScreen)
+            await pilot.press("up")  # off the active level, onto the one before
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            expected = REASONING_EFFORTS[REASONING_EFFORTS.index(active) - 1]
+            assert app._controller.session.reasoning_changed == [expected]
 
     asyncio.run(scenario())
 
@@ -521,43 +613,60 @@ def test_complete_confirms_then_writes_everything_and_closes():
     asyncio.run(scenario())
 
 
-def test_the_budgets_are_arguments_to_effort_and_not_commands():
-    """One command names the budgets; /steps and /toolcalls are gone.
+def test_reasoning_and_the_budgets_are_two_commands_and_effort_is_neither():
+    """Two subjects, two commands, and /effort is not kept as an alias.
 
-    They survived for a while as aliases of /effort, which left three ways to
-    type one thing and three names to keep documented. The budgets are still
-    settable — they are arguments — but the command surface is one command.
+    /reasoning and /budget were merged into /effort on the reading that both
+    governed how much work a message may spend. They do not: the level is how
+    the model thinks and travels to the provider, the budgets are ceilings
+    that end a run with no finding. /steps and /toolcalls stay gone — the
+    budgets are arguments of /budget — and /effort joins them rather than
+    becoming a third spelling of either half.
     """
 
     from forensic_agent.cli.commands import COMMAND_REGISTRY
 
-    assert COMMAND_REGISTRY.resolve("effort").name == "effort"
+    assert COMMAND_REGISTRY.resolve("reasoning").name == "reasoning"
+    assert COMMAND_REGISTRY.resolve("budget").name == "budget"
+    assert COMMAND_REGISTRY.resolve("effort") is None
     assert COMMAND_REGISTRY.resolve("steps") is None
     assert COMMAND_REGISTRY.resolve("toolcalls") is None
-    # The two commands /effort replaced are gone, and stayed gone.
-    assert COMMAND_REGISTRY.resolve("budget") is None
-    assert COMMAND_REGISTRY.resolve("reasoning") is None
-    assert "steps" not in COMMAND_REGISTRY.resolve("effort").aliases
-    assert "toolcalls" not in COMMAND_REGISTRY.resolve("effort").aliases
+    for name in ("effort", "steps", "toolcalls"):
+        assert name not in COMMAND_REGISTRY.resolve("reasoning").aliases
+        assert name not in COMMAND_REGISTRY.resolve("budget").aliases
+    # Each usage line carries its own subject and nothing of the other's.
+    reasoning_usage = COMMAND_REGISTRY.resolve("reasoning").usage
+    budget_usage = COMMAND_REGISTRY.resolve("budget").usage
+    assert reasoning_usage == "/reasoning [none|low|medium|high]"
+    assert budget_usage == "/budget [time S|steps N|toolcalls N]"
+    assert "steps" not in reasoning_usage and "time" not in reasoning_usage
+    assert "high" not in budget_usage and "reasoning" not in budget_usage
 
     async def scenario():
         app = build_app(_FakeLiveController())
         async with app.run_test(size=(120, 40)) as pilot:
-            # The budgets still apply, through the one command that names them.
-            app._handle_slash("/effort steps 30")
+            session = app._controller.session
+            # The budgets still apply, through the command that names them.
+            app._handle_slash("/budget steps 30")
             await pilot.pause(0.1)
-            assert app._controller.session.steps_changed == ["30"]
-            app._handle_slash("/effort toolcalls 12")
+            assert session.steps_changed == ["30"]
+            app._handle_slash("/budget toolcalls 12")
             await pilot.pause(0.1)
-            assert app._controller.session.tool_calls_changed == ["12"]
+            assert session.tool_calls_changed == ["12"]
+            app._handle_slash("/budget time 600")
+            await pilot.pause(0.1)
+            assert session.time_changed == ["600"]
             # And the removed spellings are refused as what they now are.
             notices: list[str] = []
             app.notify = lambda message, **kw: notices.append(str(message))
-            app._handle_slash("/steps 30")
-            await pilot.pause(0.1)
-            app._handle_slash("/toolcalls 30")
-            await pilot.pause(0.1)
-            assert len(notices) == 2
+            for gone in ("/effort high", "/effort steps 30", "/steps 30", "/toolcalls 30"):
+                app._handle_slash(gone)
+                await pilot.pause(0.1)
+            assert len(notices) == 4
+            assert all("Unknown command" in note for note in notices)
+            # Nothing was set by any of them.
+            assert session.steps_changed == ["30"]
+            assert session.reasoning_changed == []
             assert all("Unknown command" in notice for notice in notices)
             assert app._controller.session.steps_changed == ["30"]
 
@@ -1344,11 +1453,11 @@ def test_a_command_with_an_argument_can_still_be_typed_out_by_hand():
             sent: list[str] = []
             app._handle_slash = sent.append
 
-            for typed in ("/clear all", "/model list", "/effort steps 30"):
+            for typed in ("/clear all", "/model list", "/budget steps 30"):
                 prompt.value = typed
                 await pilot.press("enter")
                 await pilot.pause(0.05)
-            assert sent == ["/clear all", "/model list", "/effort steps 30"]
+            assert sent == ["/clear all", "/model list", "/budget steps 30"]
 
     asyncio.run(scenario())
 

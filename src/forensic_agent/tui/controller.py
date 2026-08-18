@@ -214,6 +214,11 @@ class LiveController:
             effort = reasoning.current_effort()
         except Exception:
             effort = "unknown"
+        # Imported here rather than at module scope for the reason the effort
+        # above is: the console must not pull the CLI package in at import
+        # time, and this is only ever read while a live session exists.
+        from forensic_agent.cli.budget import DEFAULT_MAX_WALL_TIME_S
+
         provider = self._provider_label()
         return StatusState(
             mode="LIVE",
@@ -226,6 +231,9 @@ class LiveController:
             max_tool_calls=int(getattr(session, "max_tool_calls", 20)),
             max_model_requests=int(getattr(getattr(session, "_runner", None), "max_model_requests", 24)),
             reasoning_effort=effort,
+            max_wall_time_s=int(
+                getattr(session, "max_wall_time_s", DEFAULT_MAX_WALL_TIME_S)
+            ),
         )
 
     def _provider_label(self) -> str:

@@ -361,7 +361,7 @@ def test_every_operation_definition_is_internally_consistent():
 
 def test_palette_availability_is_scope_driven_only():
     memory_palette = {function.name for function in functions_for_scope("memory")}
-    assert memory_palette == {"memory_query", "memory_malware_scan"}
+    assert memory_palette == {"memory_query", "memory_malware_scan", "memory_strings"}
     pcap_palette = {function.name for function in functions_for_scope("pcap")}
     assert pcap_palette == {"pcap_query"}
 
@@ -434,6 +434,12 @@ _NET_NEW_OPERATIONS = frozenset(
         # memory image could reach.
         ("bulk_extract", "find_literal"),
         ("artifact_reference_query", "hardware_vendor"),
+        # The pattern search over the raw bytes of the MEMORY image. Its name
+        # existed on the withdrawn surface, but nothing on the previous surface
+        # ran this operation, and the operation is what this mapping accounts
+        # for -- so it is declared net-new here rather than mapped to a
+        # predecessor it does not have.
+        ("memory_strings", "pattern_hits"),
     }
 )
 

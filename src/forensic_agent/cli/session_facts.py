@@ -105,10 +105,10 @@ def session_panel(
     # the provider, so it stays English on either terminal language.
     kv_row(
         t,
-        _t("effort"),
+        _t("reasoning"),
         reasoning_effort,
         ACCENT,
-        "/effort",
+        "/reasoning",
     )
     kv_row(
         t,

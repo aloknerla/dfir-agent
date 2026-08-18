@@ -8,6 +8,7 @@ live in ``test_domain_facade_dispatch.py``.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import MappingProxyType
 
@@ -27,6 +28,7 @@ from forensic_agent.agent.tool_operations import (
     function_description,
     operation_names,
 )
+from forensic_agent.agent.tool_palette import tools_for_loaded_evidence
 from forensic_agent.agent.tool_taxonomy import HOST_PATH_TOOLS, REFERENCE_TOOLS
 from forensic_agent.core.tool_availability import QUARANTINED_MODEL_TOOL_NAMES
 
@@ -126,6 +128,7 @@ def test_the_facade_surface_is_scope_driven_and_deterministically_ordered(
         "evtx_query",
         "memory_query",
         "memory_malware_scan",
+        "memory_strings",
         # Raw-image scope: feature extraction reads bytes, so it follows the
         # image the case holds rather than the disk alone, and is assembled
         # after the modality families it may serve.
@@ -166,7 +169,113 @@ def test_no_retired_legacy_name_is_model_visible(every_binary_present: None) -> 
     )
     assert names == set(DOMAIN_FUNCTIONS)
     assert names.isdisjoint(_RETIRED_NAMES)
+    # Strict again: a name recorded as withdrawn may not also be a defined
+    # function. ``memory_strings`` was briefly both, because it was redefined
+    # here while its quarantine entry still stood; that entry is deleted, and
+    # ``tool_palette`` now proves the two records disjoint at import.
     assert names.isdisjoint(QUARANTINED_MODEL_TOOL_NAMES)
+
+
+#: Characters a regular expression needs in order to be one.  The raw-byte
+#: search's guidance describes the CLASS of artefact a pattern would look for
+#: and never writes a pattern, so none of these may reach the text the model
+#: reads: an illustrative pattern there is an answer handed to the model, and
+#: what is being measured is what it reaches for without one.
+_PATTERN_METACHARACTERS = frozenset("\\[]{}()^$*+|?")
+
+#: Vocabulary that could only have come from evaluation material, together with
+#: the two shapes an example takes.  A description is guidance about an
+#: instrument; the moment it names a case, a task or a specimen value it is
+#: teaching the answer instead.
+_CASE_SPECIFIC_VOCABULARY = (
+    r"\bflags?\b",
+    r"\bctf\b",
+    r"\bnist\b",
+    r"\btasks?\b",
+    r"\bchallenges?\b",
+    r"\bfor example\b",
+    r"\be\.g\.",
+    r"://",
+)
+
+
+def test_the_raw_byte_search_is_offered_wherever_a_memory_image_is_bound(
+    every_binary_present: None,
+) -> None:
+    """A memory examination must be able to reach a string no plugin models.
+
+    The two surfaces are asserted together because either alone can be true
+    while the model is still offered nothing: the binding decides what is BUILT,
+    the palette decides what is OFFERED, and a name present in one and absent
+    from the other is a function nobody can call.
+    """
+
+    with_memory = set(_names(_context(memory_path="memory.mem")))
+    assert "memory_strings" in with_memory
+    assert "memory_strings" in tools_for_loaded_evidence(
+        disk=None, memory_path="memory.mem", pcap_path=None
+    )
+
+    # And it follows the evidence, like every other scope-bound function.
+    assert "memory_strings" not in set(_names(_context(disk=_Disk(extract=True))))
+    assert "memory_strings" not in tools_for_loaded_evidence(
+        disk=object(), memory_path=None, pcap_path=None
+    )
+
+
+def test_the_raw_byte_search_states_when_it_is_and_is_not_the_instrument(
+    every_binary_present: None,
+) -> None:
+    """The guidance has to carry all four claims, or it is not guidance.
+
+    What the instrument does, the case for reaching for it, the case against,
+    and what a hit cannot establish.  A description that carries only the first
+    is an invitation to run it on everything.
+    """
+
+    summary = DOMAIN_FUNCTIONS["memory_strings"].summary
+
+    # What it is.
+    assert "regular-expression search over the RAW BYTES" in summary
+    assert "running strings over the dump and grepping the result" in summary
+    # When it is the right move.
+    assert "a URL, a command line, a host name, a credential or token, a file name" in summary
+    assert "the plugins that would model it have returned nothing" in summary
+    # When it is the wrong move.
+    assert "WRONG instrument where a plugin already models the artefact" in summary
+    assert "structure and provenance a byte match cannot supply" in summary
+    # What a hit does not establish.
+    assert "A hit is UNANCHORED" in summary
+    assert "states nothing about which process owned them" in summary
+    assert "Encrypted, compressed and paged-out regions hold no readable text" in summary
+
+
+def test_the_raw_byte_search_guidance_names_no_pattern_and_no_case() -> None:
+    """The text the model reads must not contain the answer it is being read for.
+
+    Everything asserted here is text this project wrote: the function summary,
+    its operation's description, and the argument descriptions published in the
+    schema.  The assembled description's own scaffolding is excluded from the
+    metacharacter check because the shared formatter, not this description,
+    puts the brackets and the argument list there.
+    """
+
+    function = DOMAIN_FUNCTIONS["memory_strings"]
+    operation = function.operations[0]
+    schema = operation.arguments.model_json_schema()
+    authored = [function.summary, operation.description] + [
+        str(field.get("description", "")) for field in schema["properties"].values()
+    ]
+    for text in authored:
+        offending = _PATTERN_METACHARACTERS & set(text)
+        assert not offending, sorted(offending)
+
+    tools = {str(tool.name): tool for tool in build_tool_interface(_context(memory_path="m.mem"))}
+    everything_the_model_reads = " ".join(
+        [str(tools["memory_strings"].description), *authored]
+    ).casefold()
+    for expression in _CASE_SPECIFIC_VOCABULARY:
+        assert re.search(expression, everything_the_model_reads) is None, expression
 
 
 def test_descriptions_are_generated_from_the_registry(every_binary_present: None) -> None:

@@ -48,6 +48,7 @@ DEMO_STATUS = StatusState(
     max_tool_calls=20,
     max_model_requests=24,
     reasoning_effort="high",
+    max_wall_time_s=900,
 )
 
 

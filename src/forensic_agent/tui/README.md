@@ -82,12 +82,16 @@ risk columns) and keeps the plain-language naming pass below:
   pipeline. `/setup` walks provider configuration behind modal prompts
   (choice → model → masked key → live probe) and applies it without
   detaching evidence; `/model list` is a picker over the live catalogue —
-  `Enter` switches; `/model <id>` switches directly. `/effort` is the one
-  surface for how much work a message may spend: pick a row and `Enter`
-  edits the steps, the tool calls or the reasoning effort in place
-  (`/effort high` sets the level, and `/effort steps 30` or
-  `/effort toolcalls 30` sets a limit directly; there are no separate
-  `/steps` and `/toolcalls` commands); everything goes through the session's
+  `Enter` switches; `/model <id>` switches directly. `/reasoning` sets how much
+  reasoning the model spends per request — bare, it opens the level chooser
+  with the active level marked; `/reasoning high` sets it directly.
+  `/budget` is the surface for the resource ceilings a message may spend:
+  pick a row and `Enter` edits the wall clock, the steps or the tool calls in
+  place, and `/budget time 600`, `/budget steps 30` or `/budget toolcalls 30`
+  sets one directly. The clock is shown as a duration (`15m 00s`) and typed
+  in seconds. There are no `/steps`, `/toolcalls` or `/effort` commands —
+  the budgets are arguments of `/budget`, and `/effort`, which briefly merged
+  the level with the budgets, is gone. Everything goes through the session's
   own setters, so it persists and reaches the next message. `/doctor` runs the
   environment check into a popup.
   `/complete` (with `/export` kept as its alias) is the one end-of-case act:

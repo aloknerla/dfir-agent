@@ -374,7 +374,8 @@ def test_a_valid_argument_acts_directly_with_no_chooser():
         ("layout", "sideways", "simple"),
         ("language", "klingon", "hr"),
         ("clear", "evidence", "all"),
-        ("effort", "enormous", "high"),
+        ("reasoning", "enormous", "high"),
+        ("budget", "enormous", "steps N"),
         ("history", "lots", "number"),
         ("oversight", "everything", "calls"),
     ],
@@ -388,7 +389,7 @@ def test_an_unrecognised_argument_is_named_and_nothing_opens(
         app = build_app(DemoController())
         async with app.run_test(size=(140, 44)) as pilot:
             await pilot.pause(0.2)
-            app._controller.is_demo = False  # /history and /effort are live-only
+            app._controller.is_demo = False  # /history and /reasoning are live-only
             app.dispatch_command(command, argument)
             await pilot.pause(0.2)
             assert not isinstance(app.screen, ChoiceScreen | OverlayScreen)

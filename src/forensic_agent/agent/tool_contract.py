@@ -102,6 +102,118 @@ _IN_IMAGE_PATH_TOOLS: Mapping[str, bool] = {
 }
 _IN_IMAGE_SCOPE_TOOLS = {"printing_activity_events", "printing_job_sessions"}
 
+# ---------------------------------------------------------------------------
+# Import-time proof that every name these tables treat as a tool is accounted
+# for.
+#
+# The palette guard in :mod:`~forensic_agent.agent.tool_palette` proves that
+# every IMPLEMENTED function is offered by some palette.  It cannot see the
+# failure one level up, because a name with no implementation is not among the
+# functions it checks: ``memory_strings`` was classified here, granted a
+# capability, and given a data type, while no function defined it and no palette
+# named it, and the only symptom for the length of an evaluation was that the
+# model never called it.  A name nothing implements and nothing records as
+# withdrawn is not a conservative default — it is a capability the tables
+# advertise internally and no run can reach.
+#
+# Every name any of these tables carries must therefore be one of four things:
+# a function the registry defines, a previous name the consolidation turned into
+# an operation, a name recorded as withdrawn with its reason, or the navigation
+# function, which the model surface assembles rather than the registry.
+# Anything else is an orphan and fails here.
+# ---------------------------------------------------------------------------
+
+
+def _tool_name_tables() -> Mapping[str, frozenset[str]]:
+    """Every table that keys something by a MODEL TOOL NAME, by where it lives.
+
+    Imported inside the function rather than at module scope: these are read
+    once, at import, to check a cross-module invariant, and a permanent
+    top-level dependency on the classifier and the capability map would make
+    this module the place they are loaded from.
+    """
+
+    from forensic_agent.agent.evidence_classification import (
+        _DERIVED_TOOLS,
+        _OBSERVED_TOOLS,
+    )
+    from forensic_agent.agent.tool_taxonomy import (
+        HOST_PATH_TOOLS,
+        MEMORY_TOOLS,
+        PCAP_TOOLS,
+        RAW_IMAGE_TOOLS,
+        REFERENCE_TOOLS,
+        STORED_RESULT_NAVIGATION_TOOLS,
+    )
+    from forensic_agent.oversight.policy import DEFAULT_TOOL_CAPS
+
+    return {
+        "the tool taxonomy": frozenset(
+            HOST_PATH_TOOLS
+            | MEMORY_TOOLS
+            | PCAP_TOOLS
+            | RAW_IMAGE_TOOLS
+            | REFERENCE_TOOLS
+            | STORED_RESULT_NAVIGATION_TOOLS
+            | CITED_RESULT_INPUT_TOOLS
+        ),
+        "the result-contract data types": frozenset(_TOOL_DATA_TYPES),
+        "the capability map": frozenset(DEFAULT_TOOL_CAPS),
+        "the evidence classifier": frozenset(_OBSERVED_TOOLS) | frozenset(_DERIVED_TOOLS),
+    }
+
+
+def accounted_tool_names() -> frozenset[str]:
+    """Every name that has a disposition: defined, superseded, withdrawn, or navigation."""
+
+    from forensic_agent.agent.tool_taxonomy import STORED_RESULT_NAVIGATION_TOOLS
+    from forensic_agent.core.tool_availability import QUARANTINED_MODEL_TOOL_NAMES
+
+    return (
+        frozenset(DOMAIN_FUNCTIONS)
+        | frozenset(LEGACY_FUNCTION_DISPOSITIONS)
+        | QUARANTINED_MODEL_TOOL_NAMES
+        | STORED_RESULT_NAVIGATION_TOOLS
+    )
+
+
+def orphaned_tool_names(
+    tables: Mapping[str, frozenset[str]] | None = None,
+    *,
+    accounted: Collection[str] | None = None,
+) -> Mapping[str, tuple[str, ...]]:
+    """Names a table calls a tool that nothing defines, supersedes or withdraws.
+
+    Returns ``name -> the tables that carry it``, so a failure names both the
+    offending tool and where the claim about it is written.  The arguments exist
+    so the rule can be exercised against a stated set: a guard that can only be
+    run on input already known to pass is a guard nobody has watched work.
+    """
+
+    checked = _tool_name_tables() if tables is None else tables
+    known = accounted_tool_names() if accounted is None else frozenset(accounted)
+    orphans: dict[str, tuple[str, ...]] = {}
+    for name in frozenset().union(*checked.values()) - known:
+        orphans[name] = tuple(
+            sorted(label for label, table in checked.items() if name in table)
+        )
+    return orphans
+
+
+_ORPHANED_TOOL_NAMES = orphaned_tool_names()
+if _ORPHANED_TOOL_NAMES:
+    raise RuntimeError(
+        "these names are treated as model tools and nothing defines, supersedes "
+        "or withdraws them, so no run can reach them: "
+        + "; ".join(
+            f"{name} (named by {', '.join(where)})"
+            for name, where in sorted(_ORPHANED_TOOL_NAMES.items())
+        )
+        + ". Implement it and put it on a live palette, or record it in "
+        "QUARANTINED_MODEL_TOOLS with the reason it is unreachable."
+    )
+
+
 #: ``(domain function, operation) -> previous model-visible name``, derived from
 #: the consolidation's own disposition table so it cannot drift from it.
 _LEGACY_NAME_BY_OPERATION: dict[tuple[str, str], str] = {

@@ -9,8 +9,14 @@ from langchain_core.tools import StructuredTool
 from pydantic import Field, create_model
 
 from forensic_agent.agent.tool_bindings.context import ToolBuildContext
-from forensic_agent.agent.tool_operations import MEMORY_PLUGINS
+from forensic_agent.agent.tool_operations import (
+    _MEMORY_STRING_HIT_CAP,
+    MEMORY_PLUGINS,
+)
 from forensic_agent.core.repro import canonical_json, sha256_hex
+from forensic_agent.tools.memory_tool import (
+    _STRING_SCAN_MAX_HITS as _BACKEND_STRING_HIT_CAP,
+)
 from forensic_agent.tools.memory_tool import PLUGINS as _BACKEND_MEMORY_PLUGINS
 
 # Import-time proof that every plugin the model-visible curated enum offers can be
@@ -23,6 +29,16 @@ if _MISSING_BACKEND_PLUGINS:
     raise RuntimeError(
         "the curated memory plugin enum names plugins the backend cannot resolve: "
         f"{sorted(_MISSING_BACKEND_PLUGINS)}"
+    )
+
+# The same proof one bound over: the schema publishes a ceiling for the raw-byte
+# search's hit budget and the scanner clamps to its own.  Equality, not subset,
+# because a schema ceiling above the clamp would advertise a budget the scan
+# silently lowers, and one below it would withhold a budget the scan honours.
+if _MEMORY_STRING_HIT_CAP != _BACKEND_STRING_HIT_CAP:
+    raise RuntimeError(
+        "the memory string search's published hit ceiling and the scanner's own "
+        f"clamp disagree: {_MEMORY_STRING_HIT_CAP} vs {_BACKEND_STRING_HIT_CAP}"
     )
 
 
@@ -254,4 +270,54 @@ def _build_memory_tools(context: ToolBuildContext) -> list[StructuredTool]:
             )
         )
 
+    return tools
+
+
+def _build_memory_string_search_tools(context: ToolBuildContext) -> list[StructuredTool]:
+    """The raw-byte pattern search over the bound memory image, as its own segment.
+
+    Its own segment for the same reason the whole-image searches have one: the
+    recorded pre-consolidation palette is rebuilt from ``_build_memory_tools``
+    alone, and a function appended there would join a palette it was never part
+    of.  Only the facade's index collects this, so the model reaches it
+    exclusively as the ``memory_strings`` domain function.
+
+    It declares no external dependency because it has none: the scan reads the
+    image with the standard library and launches nothing, which is also why it
+    is built whenever a memory image is bound rather than gated on a binary.
+    """
+
+    memory_path = context.memory_path
+    _emit = context.emit
+    _begin = context.begin
+    tools: list[StructuredTool] = []
+
+    def memory_strings(
+        pattern: str,
+        encoding: Literal["ascii", "utf16le", "both"] = "both",
+        max_hits: int = 200,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """Search the RAW BYTES of the memory image with a regular expression."""
+
+        from forensic_agent.tools.memory_tool import memory_strings as _ms
+
+        call_arguments = {"pattern": pattern, "encoding": encoding}
+        # A full pass over a multi-gigabyte image takes time; announce the call
+        # before it starts so the feed shows it working rather than a frozen pane.
+        _begin("memory_strings", call_arguments)
+        t0 = time.time()
+        r = _ms(
+            memory_path,  # type: ignore[arg-type]
+            pattern,
+            encoding=encoding,
+            limit=limit,
+            offset=offset,
+            max_hits=max_hits,
+        )
+        _emit("memory_strings", call_arguments, t0)
+        return r
+
+    tools.append(StructuredTool.from_function(memory_strings))
     return tools

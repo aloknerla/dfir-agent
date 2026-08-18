@@ -19,6 +19,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -2005,3 +2006,332 @@ def _derived_operation_result(
         **described,
         **shape(items, offset=offset, limit=limit, filter=filter),
     }
+
+
+# ---------------------------------------------------------------------------
+# The raw-byte pattern search: a regular expression over the image itself.
+# ---------------------------------------------------------------------------
+
+#: Bytes read per pass.  Large enough that a multi-gigabyte image is read in a
+#: bounded number of passes, small enough that one pass and the two text views
+#: taken over it stay inside an ordinary process footprint.
+_STRING_SCAN_CHUNK_BYTES = 8 * 1024 * 1024
+#: Bytes each pass repeats from the one before it, so a match lying across a
+#: pass boundary is still found.  Hits are keyed by their absolute offset in the
+#: image, so the repeated bytes produce no duplicate row.
+_STRING_SCAN_OVERLAP_BYTES = 64 * 1024
+#: Ceiling on the pattern itself.  Something longer than this is a payload
+#: rather than a search term, and nothing about its runtime can be predicted.
+_STRING_SCAN_MAX_PATTERN_CHARS = 512
+#: Characters of matched text one row carries.  A quantified pattern can match
+#: a region megabytes long; the row states that it was cut instead of carrying
+#: it.
+_STRING_SCAN_MAX_MATCH_CHARS = 240
+#: Bytes of surrounding image content reported either side of a hit, rendered
+#: with non-printable bytes shown as '.' so the row stays readable text.
+_STRING_SCAN_CONTEXT_BYTES = 40
+#: Wall-clock budget for one scan.  A pass that exceeds it stops and the result
+#: says which byte it reached, because a scan that returns nothing after an
+#: hour is indistinguishable from a scan that found nothing.
+_STRING_SCAN_SECONDS = 300.0
+#: Ceiling the caller's own ``max_hits`` is clamped to.
+_STRING_SCAN_MAX_HITS = 2000
+#: One scan per (image, pattern, encoding, ceiling) is retained so the later
+#: pages of the same result are served without reading the image again.
+_STRING_SCAN_CACHE_ENTRIES = 8
+
+#: Model-visible encoding selectors, and the label a row reports for each view.
+_STRING_SCAN_ENCODINGS: tuple[str, ...] = ("ascii", "utf16le", "both")
+_STRING_SCAN_ENCODING_LABELS: dict[str, str] = {
+    "ascii": "ascii",
+    "utf16le": "utf-16le",
+}
+
+_string_hit_cache: dict[tuple[object, ...], tuple[list[dict], dict]] = {}
+_string_hit_cache_lock = threading.Lock()
+
+
+def _printable_bytes(raw: bytes) -> str:
+    """Render raw bytes as text, standing in for what cannot be printed."""
+
+    return "".join(chr(value) if 32 <= value < 127 else "." for value in raw)
+
+
+def _string_scan_row(
+    window: bytes,
+    window_base: int,
+    *,
+    start: int,
+    end: int,
+    stride: int,
+    text: str,
+    encoding: str,
+) -> dict:
+    """One hit, addressed by its absolute offset in the image.
+
+    ``stride`` is how many image bytes one character of ``text`` occupies (one
+    for the single-byte view, two for the UTF-16LE one), which is what turns a
+    character index back into a byte offset.
+    """
+
+    matched = text[start:end]
+    cut = len(matched) > _STRING_SCAN_MAX_MATCH_CHARS
+    byte_start = start * stride
+    byte_end = end * stride
+    context_start = max(0, byte_start - _STRING_SCAN_CONTEXT_BYTES)
+    context_end = min(len(window), byte_end + _STRING_SCAN_CONTEXT_BYTES)
+    row = {
+        "offset": window_base + byte_start,
+        "encoding": _STRING_SCAN_ENCODING_LABELS[encoding],
+        "match": matched[:_STRING_SCAN_MAX_MATCH_CHARS],
+        "match_bytes": byte_end - byte_start,
+        "context": _printable_bytes(window[context_start:context_end]),
+    }
+    if cut:
+        row["match_truncated"] = True
+    return row
+
+
+def _scan_memory_strings(
+    dump_path: str,
+    matcher: re.Pattern[str],
+    encoding: str,
+    max_hits: int,
+) -> tuple[list[dict], dict]:
+    """Read the image once and collect every match, in image order.
+
+    Two views are taken over the same bytes.  The single-byte view is the bytes
+    themselves read as one character each, so a character index IS a byte
+    offset.  The UTF-16LE view is taken by matching the low byte of each pair
+    and then confirming that every high byte the match spans is zero, which is
+    the same run a UTF-16LE text extractor recognises; both pair alignments are
+    tried, because a string in memory is not obliged to start on an even
+    boundary.
+
+    Nothing here ranks, scores, or orders the hits by anything but their offset:
+    which of them matters is a question about the case, and this function has no
+    material to answer it with.
+    """
+
+    image_bytes = os.path.getsize(dump_path)
+    wants_ascii = encoding in ("ascii", "both")
+    wants_utf16 = encoding in ("utf16le", "both")
+    deadline = time.monotonic() + _STRING_SCAN_SECONDS
+    hits: list[dict] = []
+    seen: set[tuple[int, str]] = set()
+    ceiling_reached = False
+    expired = False
+    scanned = 0
+    position = 0
+    with open(dump_path, "rb") as image:
+        while position < image_bytes:
+            image.seek(position)
+            window = image.read(_STRING_SCAN_CHUNK_BYTES)
+            if not window:
+                break
+            scanned = position + len(window)
+            found: list[dict] = []
+            if wants_ascii:
+                text = window.decode("latin-1")
+                for match in matcher.finditer(text):
+                    found.append(
+                        _string_scan_row(
+                            window,
+                            position,
+                            start=match.start(),
+                            end=match.end(),
+                            stride=1,
+                            text=text,
+                            encoding="ascii",
+                        )
+                    )
+            if wants_utf16:
+                for align in (0, 1):
+                    units = window[align:]
+                    low = units[0::2]
+                    high = units[1::2]
+                    pairs = min(len(low), len(high))
+                    text = low[:pairs].decode("latin-1")
+                    for match in matcher.finditer(text):
+                        start, end = match.span()
+                        if high[start:end].count(0) != end - start:
+                            # A non-zero high byte means these bytes are not a
+                            # run of UTF-16LE text; reporting them would be this
+                            # function inventing an encoding the image does not
+                            # carry.
+                            continue
+                        found.append(
+                            _string_scan_row(
+                                units,
+                                position + align,
+                                start=start,
+                                end=end,
+                                stride=2,
+                                text=text,
+                                encoding="utf16le",
+                            )
+                        )
+            for row in sorted(found, key=lambda item: (item["offset"], item["encoding"])):
+                key = (int(row["offset"]), str(row["encoding"]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(row)
+                if len(hits) >= max_hits:
+                    ceiling_reached = True
+                    break
+            if ceiling_reached:
+                break
+            if len(window) < _STRING_SCAN_CHUNK_BYTES:
+                break
+            if time.monotonic() > deadline:
+                expired = True
+                break
+            position += _STRING_SCAN_CHUNK_BYTES - _STRING_SCAN_OVERLAP_BYTES
+    hits.sort(key=lambda item: (item["offset"], item["encoding"]))
+    complete = not ceiling_reached and not expired
+    scan = {
+        "image_bytes": image_bytes,
+        "bytes_examined": scanned,
+        "complete": complete,
+        "hit_ceiling_reached": ceiling_reached,
+        "time_budget_exhausted": expired,
+    }
+    return hits, scan
+
+
+def _cached_string_hits(
+    key: tuple[object, ...],
+) -> tuple[list[dict], dict] | None:
+    """Serve one previously produced hit set, refreshing its LRU position."""
+
+    with _string_hit_cache_lock:
+        found = _string_hit_cache.pop(key, None)
+        if found is None:
+            return None
+        _string_hit_cache[key] = found
+        return found
+
+
+def _store_string_hits(key: tuple[object, ...], found: tuple[list[dict], dict]) -> None:
+    """Retain one bounded hit set for the remaining pages of the same result."""
+
+    with _string_hit_cache_lock:
+        _string_hit_cache.pop(key, None)
+        _string_hit_cache[key] = found
+        while len(_string_hit_cache) > _STRING_SCAN_CACHE_ENTRIES:
+            _string_hit_cache.pop(next(iter(_string_hit_cache)))
+
+
+def memory_strings(
+    dump_path: str,
+    pattern: str,
+    encoding: str = "both",
+    limit: int = 50,
+    offset: int = 0,
+    max_hits: int = 200,
+) -> dict:
+    """Search the RAW BYTES of a memory image with a regular expression.
+
+    This is the structured equivalent of running ``strings`` over the dump and
+    grepping the output: it reads the image as bytes and does not consult any
+    Volatility plugin, so it reaches content no plugin models. It is the right
+    instrument when the artefact is a loose string with nothing structured
+    behind it, and the wrong one when a plugin already models the artefact,
+    because the plugin carries structure and provenance a byte match cannot.
+
+    `pattern` is a Python regular expression matched against the image read as
+    text. `encoding` selects the view it is matched in: 'ascii' reads each byte
+    as one character, 'utf16le' reads pairs of bytes as UTF-16LE text, 'both'
+    (the default) reads the image in each view, because a memory image holds
+    strings in both. `offset`/`limit` page the collected hits; `max_hits` bounds
+    how many the scan collects at all.
+
+    Returns rows of {offset, encoding, match, match_bytes, context}, ordered by
+    their offset in the image. A hit is UNANCHORED: the offset locates the bytes
+    in the image and states nothing about which process owned them, whether the
+    allocation was live, or when the bytes were written. Encrypted, compressed
+    and paged-out regions hold no readable text and are matched by nothing, so a
+    result with no rows is evidence about this pattern in this image and not
+    evidence that the artefact was never present. Read-only. On failure returns
+    {"error"}.
+    """
+    if not dump_path or not os.path.exists(dump_path):
+        return {"error": "memory dump not available (set one with --memory / /memory)."}
+    requested_encoding = (encoding or "").strip().casefold() or "both"
+    if requested_encoding not in _STRING_SCAN_ENCODINGS:
+        return {
+            "error": f"unknown encoding '{encoding}'. Use one of: "
+            f"{', '.join(_STRING_SCAN_ENCODINGS)}."
+        }
+    expression = str(pattern or "")
+    if not expression.strip():
+        return {"error": "pattern must not be empty."}
+    if len(expression) > _STRING_SCAN_MAX_PATTERN_CHARS:
+        return {
+            "error": "pattern is longer than "
+            f"{_STRING_SCAN_MAX_PATTERN_CHARS} characters; narrow it to the "
+            "text being looked for."
+        }
+    try:
+        matcher = re.compile(expression)
+    except re.error as exc:
+        return {
+            "error": f"pattern is not a valid regular expression: {str(exc)[:160]}"
+        }
+    if matcher.search("") is not None:
+        # Every offset satisfies it, so the scan would report the image itself.
+        return {
+            "error": "pattern matches the empty string, so every position in the "
+            "image satisfies it; require at least one character."
+        }
+    ceiling = max(1, min(int(max_hits), _STRING_SCAN_MAX_HITS))
+    key = (_memory_source_identity(dump_path), expression, requested_encoding, ceiling)
+    found = _cached_string_hits(key)
+    if found is None:
+        try:
+            found = _scan_memory_strings(dump_path, matcher, requested_encoding, ceiling)
+        except (OSError, MemoryError) as exc:
+            return tool_failure_result(
+                exc, subject=str(dump_path), backend="cpython_stdlib"
+            )
+        _store_string_hits(key, found)
+    hits, scan = found
+
+    from forensic_agent.core.toolio import shape
+
+    views = (
+        [_STRING_SCAN_ENCODING_LABELS[requested_encoding]]
+        if requested_encoding != "both"
+        else [_STRING_SCAN_ENCODING_LABELS["ascii"], _STRING_SCAN_ENCODING_LABELS["utf16le"]]
+    )
+    result: dict = {
+        "pattern": expression,
+        "encodings": views,
+        "scanned": "the raw bytes of the memory image, allocated and free alike",
+        "image_bytes": scan["image_bytes"],
+        "bytes_examined": scan["bytes_examined"],
+        "hit_ceiling": ceiling,
+        "count": len(hits),
+        "coverage_complete": bool(scan["complete"]),
+    }
+    if not scan["complete"]:
+        # Stated as SOURCE coverage, never as page truncation: the two answer
+        # different questions, and a caller told only that a page was short
+        # would read a stopped scan as a finished one.
+        reason = (
+            f"the scan stopped at the {ceiling}-hit ceiling, before the end of the "
+            "image; raise max_hits or narrow the pattern"
+            if scan["hit_ceiling_reached"]
+            else "the scan reached its time budget before the end of the image; "
+            "narrow the pattern"
+        )
+        result["coverage"] = {
+            "complete": False,
+            "scope": "the whole memory image",
+            "examined": scan["bytes_examined"],
+            "expected": scan["image_bytes"],
+            "reason": reason,
+        }
+    result.update(shape(hits, offset=offset, limit=limit))
+    return result

@@ -158,6 +158,11 @@ _NO_REGION_OPERATIONS: frozenset[str] = frozenset(
         "memory_query.field_distribution",
         "memory_malware_scan.scan_pid",
         "memory_malware_scan.scan_all_candidates",
+        # It scans the raw bytes of the MEMORY image, so what it reaches is
+        # unreferenced content of a medium these regions do not describe: they
+        # are regions of the disk image, and crediting a memory scan with one
+        # would let it stand in for a raw read of the disk that never happened.
+        "memory_strings.pattern_hits",
         "pcap_query.dns",
         "pcap_query.http",
         "pcap_query.http_auth",

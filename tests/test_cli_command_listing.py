@@ -393,6 +393,7 @@ def test_the_console_routes_the_calls_form_to_the_full_listing(tmp_path: Path) -
                 evidence_sources=("disk: image.E01",),
                 max_steps=20,
                 max_tool_calls=20,
+                max_wall_time_s=900,
                 max_model_requests=23,
                 reasoning_effort="high",
             )

@@ -148,6 +148,16 @@ non-evidentiary case brief with `/context`. Evidence is always mounted
 read-only, and opening a new host path requires one host-side approval before it
 becomes visible to the console.
 
+Two commands govern what one question is allowed to consume. `/reasoning`
+sets how much reasoning the model spends per request (`none`, `low`, `medium`,
+`high`). `/budget` sets the ceilings on the run itself — the wall clock in
+seconds, the investigation steps and the tool calls — as `/budget time 600`,
+`/budget steps 30` and `/budget toolcalls 30`, or on the screen a bare
+`/budget` opens. A question that exhausts one of those ceilings ends there
+and publishes no finding, so a run that keeps stopping short is asking for a
+larger budget. Both settings apply to the next question and are kept for the
+next launch.
+
 ### Updating
 
 A `git pull` does not change the image. Until it is rebuilt, the console keeps
