@@ -447,3 +447,86 @@ def test_no_long_croatian_entry_is_keyed_to_text_the_code_no_longer_writes() -> 
         if not key.startswith("_") and len(key) >= 60 and key not in literals
     )
     assert stale == []
+
+
+# ---------------------------------------------------------------------------
+# the full-screen console follows the setting too
+# ---------------------------------------------------------------------------
+def test_the_console_frame_changes_language_and_changes_back(tmp_path, monkeypatch):
+    """/language hr used to leave the console itself in English.
+
+    The setting was stored and the shell's own views translated, because those
+    render through modules that route their strings through this layer. The
+    full-screen console routed none of its own: it drew its pane titles, its
+    prompt and its resting hints as literals, so the one surface the operator
+    is looking at did not change and the setting read as broken.
+
+    Switching now redraws the console the way a theme switch does — from the
+    recipe each line was mounted with — and re-applies the attributes that are
+    not recipes at all.
+    """
+
+    import asyncio
+
+    pytest.importorskip("textual")
+
+    from textual.widgets import Input
+
+    from forensic_agent.tui import build_app
+    from forensic_agent.tui.controller import DemoController
+
+    monkeypatch.setattr(
+        "forensic_agent.tui.controller.time.sleep", lambda *_: None, raising=False
+    )
+    # The preference is a real file; a test must not rewrite the operator's.
+    monkeypatch.setenv("DFA_RUN_DIR", str(tmp_path))
+
+    def titles(app) -> dict:
+        return {
+            pane_id: str(app.query_one(pane_id).border_title or "")
+            for pane_id in (
+                "#conversation",
+                "#activity",
+                "#evidence-pane",
+                "#guardrails-pane",
+            )
+        }
+
+    async def scenario():
+        app = build_app(DemoController())
+        # Pinned, as every console test here pins it: the ambient terminal is
+        # not the same on this machine as in CI.
+        async with app.run_test(size=(140, 44)) as pilot:
+            await pilot.pause(0.3)
+            english = titles(app)
+            assert english["#conversation"] == "CONVERSATION"
+            assert english["#guardrails-pane"] == "GUARDRAILS"
+            english_placeholder = app.query_one("#prompt", Input).placeholder
+
+            app._set_language("hr")
+            await pilot.pause(0.3)
+            croatian = titles(app)
+            assert croatian["#conversation"] == "RAZGOVOR"
+            assert croatian["#activity"] == "AKTIVNOST"
+            assert croatian["#evidence-pane"] == "DOKAZI"
+            assert croatian["#guardrails-pane"] != english["#guardrails-pane"]
+            assert app.query_one("#prompt", Input).placeholder != english_placeholder
+
+            # A pane's resting hint is a recipe, so it is redrawn in place
+            # rather than left in the language it was mounted in.
+            hint = app.query_one("#activity-hint")
+            rendered = hint.render()
+            rendered = getattr(rendered, "_renderable", rendered)
+            shown = getattr(rendered, "plain", str(rendered))
+            assert "Tool calls appear here" not in shown, shown
+            assert "Pozivi alata" in shown, shown
+
+            # And back, so the switch is a switch and not a one-way door.
+            app._set_language("en")
+            await pilot.pause(0.3)
+            assert titles(app) == english
+            assert app.query_one("#prompt", Input).placeholder == english_placeholder
+
+    # The autouse fixture above restores the process language; nothing to
+    # undo here.
+    asyncio.run(scenario())

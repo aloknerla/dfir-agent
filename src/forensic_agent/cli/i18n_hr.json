@@ -283,5 +283,16 @@
   "This view describes the reading. The evidence content itself is not shown here.": "Ovaj prikaz opisuje očitanje. Sam sadržaj dokaza ovdje se ne prikazuje.",
   "This view lists findings and the SHA-256 each was recorded under. The evidence content itself is not shown here.": "Ovaj prikaz navodi nalaze i SHA-256 pod kojim je svaki zabilježen. Sam sadržaj dokaza ovdje se ne prikazuje.",
   "none recorded": "nije zabilježeno",
-  "or": "ili"
+  "or": "ili",
+  "Conversation": "Razgovor",
+  "Activity": "Aktivnost",
+  "Guardrails": "Zaštite",
+  "type a message — Enter sends, Esc browses": "upišite poruku — Enter šalje, Esc pregledava",
+  "You accept findings with v": "Nalaze prihvaćate tipkom v",
+  "Tool calls appear here as they run.": "Pozivi alata pojavljuju se ovdje dok se izvode.",
+  "Grouped per message.  Digit keys jump between them.": "Grupirani po poruci.  Tipke s brojkama skoče među njima.",
+  "Findings you accept become the case evidence.": "Nalazi koje prihvatite postaju dokazi predmeta.",
+  "Press v to review.  Enter opens a detail.": "Pritisnite v za pregled.  Enter otvara pojedinosti.",
+  "Each step needs the case's permission.": "Svaki korak treba dopuštenje predmeta.",
+  "Denials appear here.": "Odbijanja se pojavljuju ovdje."
 }

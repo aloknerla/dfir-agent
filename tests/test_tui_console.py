@@ -1920,7 +1920,7 @@ def test_a_count_nobody_recorded_is_left_out_rather_than_printed_as_none():
 
 
 def test_every_usage_line_reaches_the_input_border_verbatim():
-    """A border subtitle is parsed as markup, and a usage line is mostly brackets.
+    r"""A border subtitle is parsed as markup, and a usage line is mostly brackets.
 
     rich.markup.escape only escapes the brackets that LOOK like tags, so
     /model's nested form arrived on screen as
@@ -2108,3 +2108,162 @@ def test_nothing_deferred_is_applied_while_the_orphaned_thread_is_still_running(
             assert app._controller.session.context_set == ["still investigating"]
 
     asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# GUARDRAILS leads with whatever actually varied
+# ---------------------------------------------------------------------------
+#: The pane is a third of the narrow right-hand column. Its width is pinned for
+#: the same reason the other console tests pin theirs: the ambient terminal is
+#: not the same here as it is in CI, and these assertions are about which line
+#: comes first, not about where it wraps.
+_GUARD_WIDTH = 46
+
+
+def _oversight_card(sequence: int, **overrides):
+    from forensic_agent.tui.model import OversightCard
+
+    fields = {
+        "sequence": sequence,
+        "function": "registry_query",
+        "operation": "read_key",
+        "outcome": "executed",
+        "requested_caps": ("read_evidence",),
+        "granted_caps": ("read_evidence", "spawn_process"),
+        "allowed_tools": None,
+        "write_scope": (),
+        "risk_name": "low",
+        "reasons": (),
+        "duration_s": 0.1,
+        "arguments": (("key", "SYSTEM"),),
+        "refusal_message": "",
+        "outcome_detail": "",
+    }
+    fields.update(overrides)
+    return OversightCard(**fields)
+
+
+def _guardrail_summary_lines(cards) -> tuple[list[str], str]:
+    """What the pane's standing summary shows, and what its frame says."""
+
+    import io
+
+    from rich.console import Console as RichConsole
+
+    from forensic_agent.tui.model import InvestigationResult
+
+    out: dict[str, object] = {}
+
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(140, 44)) as pilot:
+            await pilot.pause(0.2)
+            result = InvestigationResult.__new__(InvestigationResult)
+            object.__setattr__(result, "oversight", tuple(cards))
+            app._populate_guardrails(result)
+            await pilot.pause(0.2)
+            widget = app.query_one("#guardrails-summary", Static)
+            renderable = widget.render()
+            renderable = getattr(renderable, "_renderable", renderable)
+            console = RichConsole(
+                width=_GUARD_WIDTH, record=True, file=io.StringIO()
+            )
+            console.print(renderable)
+            out["lines"] = [
+                line.rstrip()
+                for line in console.export_text().rstrip(chr(10)).split(chr(10))
+            ]
+            out["subtitle"] = str(
+                app.query_one("#guardrails-pane").border_subtitle or ""
+            )
+
+    asyncio.run(scenario())
+    return out["lines"], out["subtitle"]  # type: ignore[return-value]
+
+
+def test_a_run_with_nothing_notable_says_so_in_one_quiet_line():
+    """The pane must not manufacture alarm, and must not fill space to look busy.
+
+    Across 506 recorded calls on one case, 13 were refused, none for a
+    capability, none for a path outside the case roots, and nothing was ever
+    classified above low risk. A pane that leads with a standing "everything
+    was allowed" is telling the operator something that is almost always true,
+    which is another way of telling them nothing.
+    """
+
+    lines, subtitle = _guardrail_summary_lines(
+        [_oversight_card(index) for index in range(9)]
+    )
+    assert lines[0].startswith("✓"), lines
+    assert "Nothing was stopped in 9 checked steps" in lines[0]
+    # Nothing was refused and nothing was guessed, so the frame stays silent
+    # rather than carrying a zero.
+    assert subtitle == ""
+    # One line about the state, and only the capability line under it: the
+    # space goes back rather than being filled.
+    assert len(lines) <= 2, lines
+    assert any("exercised" in line for line in lines)
+
+
+def test_a_guessed_location_is_what_the_pane_leads_with_when_nothing_was_refused():
+    """The signal that was recorded 272 times and never shown.
+
+    ``ungrounded-path`` is advisory: the call went through. It says the model
+    asked for a location that no earlier finding placed there — it guessed
+    where the data lives. That is the one thing in this record that varies
+    sharply between models, and the pane never mentioned it.
+    """
+
+    cards = [
+        _oversight_card(index, reasons=(rf"ungrounded-path:key=SYSTEM\Svc{index}",))
+        for index in range(8)
+    ]
+    cards.append(_oversight_card(99))
+    lines, subtitle = _guardrail_summary_lines(cards)
+
+    assert lines[0].startswith("▲"), lines
+    assert "8 of 9 calls guessed a location" in lines[0]
+    body = " ".join(lines)
+    # Advisory, and said so: nothing here was stopped.
+    assert "Nothing was blocked" in body
+    # The guessed locations are named, which is the point of showing them.
+    assert r"key=SYSTEM\Svc0" in body
+    # Bounded, and the remainder counted rather than dropped in silence.
+    assert "more" in body
+    assert "8 guessed" in subtitle
+
+
+def test_an_argument_refusal_leads_and_says_why_in_plain_words():
+    """Every refusal measured on that case was of exactly this kind.
+
+    The words have to say what was actually refused. What this layer stopped
+    were malformed calls, and a pane that let that read as an intrusion would
+    misdescribe the system it reports on.
+    """
+
+    cards = [
+        _oversight_card(
+            1,
+            outcome="refused_by_oversight",
+            outcome_detail="invalid_operation_arguments",
+            reasons=("invalid-arguments:invalid_operation_arguments",),
+            refusal_message="proto: not an argument of this operation.",
+        ),
+        _oversight_card(2, reasons=("ungrounded-path:path=/Users/x/NTUSER.DAT",)),
+        _oversight_card(3, requested_caps=("spawn_process",)),
+    ]
+    lines, subtitle = _guardrail_summary_lines(cards)
+
+    assert lines[0].startswith("✗"), lines
+    lead = " ".join(lines[:2])
+    assert "1 call refused" in lead
+    assert "arguments the operation does not accept" in lead
+    # No word here may suggest an attack was repelled.
+    body = " ".join(lines).lower()
+    for overstatement in ("attack", "threat", "malicious", "intrusion", "blocked an"):
+        assert overstatement not in body, body
+    # The advisory still gets its count, under the refusal that outranked it.
+    assert "1 call also guessed a location" in " ".join(lines)
+    assert "1 refused" in subtitle and "1 guessed" in subtitle
+    # What the run actually exercised, which differs by evidence type.
+    assert any("spawn process" in line for line in lines), lines

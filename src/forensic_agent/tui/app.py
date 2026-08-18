@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import io
 import re
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -66,6 +67,7 @@ from textual.widgets import (
     Static,
 )
 
+from forensic_agent.cli.i18n import t as _t
 from forensic_agent.cli.terminal import BANNER_ART as _BANNER_ART
 from forensic_agent.cli.terminal import BANNER_SUBTITLE as _BANNER_SUBTITLE
 from forensic_agent.core.durations import format_duration
@@ -753,6 +755,21 @@ class ConversationPane(VerticalScroll):
 
     def on_resize(self, event: events.Resize) -> None:
         self.post_message(self.Resized(self))
+
+
+#: The four pane names, uppercased at the point of use rather than stored that
+#: way: the console's style is uppercase pane titles, but a translation belongs
+#: in the catalog in its own ordinary form, and "GUARDRAILS" is not a word a
+#: translator should be handed. Read through the language layer at call time,
+#: never bound to a constant, so a switch reaches them.
+def _pane_title(name: str) -> str:
+    return _t(name).upper()
+
+
+#: The prompt's resting text, named once. It is applied at compose time and
+#: again when the language changes, and a second copy of the literal is a
+#: second catalog key waiting to drift out of step with the first.
+_PROMPT_PLACEHOLDER = "type a message \u2014 Enter sends, Esc browses"
 
 
 def _call_name(function: str, operation: str) -> Text:
@@ -2429,6 +2446,15 @@ class InvestigationApp(App):
         self._evidence_last_group = 0
         self._guardrail_blocks: list = []
         self._guardrail_allowed_total = 0
+        #: Everything this case's oversight record has said so far, kept because
+        #: the pane states the CASE and a result object only knows its own
+        #: message. Counts and a bounded sample, never the whole record: the
+        #: record is on disk and this is a panel.
+        self._guardrail_checked_total = 0
+        self._guardrail_refusals: list[OversightCard] = []
+        self._guardrail_guessed: list[tuple[str, str]] = []
+        self._guardrail_guessed_calls = 0
+        self._guardrail_caps: set[str] = set()
         self._layout = "full"
         # How much room the opening screen's Session panel is taking, and which
         # wordmark was chosen for what was left. The count starts generous: the
@@ -2466,10 +2492,10 @@ class InvestigationApp(App):
                 activity.can_focus = True
                 yield activity
                 evidence_pane = VerticalScroll(id="evidence-pane")
-                evidence_pane.border_title = "EVIDENCE"
+                evidence_pane.border_title = _pane_title("Evidence")
                 yield evidence_pane
                 guardrails_pane = VerticalScroll(id="guardrails-pane")
-                guardrails_pane.border_title = "GUARDRAILS"
+                guardrails_pane.border_title = _pane_title("Guardrails")
                 yield guardrails_pane
         # The commands a half-typed slash matches, listed above the prompt. A
         # Static, so it cannot take focus and cannot take a keystroke: it is
@@ -2479,7 +2505,7 @@ class InvestigationApp(App):
         yield hints
         yield PromptInput(
             id="prompt",
-            placeholder="type a message — Enter sends, Esc browses",
+            placeholder=_t(_PROMPT_PLACEHOLDER),
             # Slash commands complete inline. Nothing is captured: the ghost
             # text is a suggestion, Tab takes it, and Enter always sends the
             # characters actually in the line.
@@ -2490,9 +2516,9 @@ class InvestigationApp(App):
 
     def on_mount(self) -> None:
         conversation = self.query_one("#conversation", VerticalScroll)
-        conversation.border_title = "CONVERSATION"
+        conversation.border_title = _pane_title("Conversation")
         activity = self.query_one("#activity", VerticalScroll)
-        activity.border_title = "ACTIVITY"
+        activity.border_title = _pane_title("Activity")
         self._rest_panes()
         self.set_interval(0.12, self._tick)
         # The case-opening row is driven by a clock of its own rather than by
@@ -4187,6 +4213,11 @@ class InvestigationApp(App):
         self._guardrail_groups.clear()
         self._guardrail_blocks.clear()
         self._guardrail_allowed_total = 0
+        self._guardrail_checked_total = 0
+        self._guardrail_refusals.clear()
+        self._guardrail_guessed.clear()
+        self._guardrail_guessed_calls = 0
+        self._guardrail_caps.clear()
         self._last_result = None
         if not keep_findings:
             self._evidence_cards.clear()
@@ -4978,7 +5009,38 @@ class InvestigationApp(App):
             self.notify(str(exc)[:240], severity="error", title="/language")
             return
         note = " ".join(recorder.export_text(styles=False).split())
+        self._apply_language()
         self.notify(note[:240] or "Language updated.", title="/language", timeout=8)
+
+    def _apply_language(self) -> None:
+        """Redraw the console in the language now in force.
+
+        The setter above changes the language and persists it, and that used
+        to be all that happened: the console went on showing every word it
+        had already drawn, because a Rich renderable carries its text exactly
+        as a themed one carries its colours. So /language hr translated the
+        popups that are rendered through the shell's own views and left the
+        console's own frame in English, which reads as the setting not having
+        worked at all.
+
+        The mechanism is the one /theme already uses. Every line that can
+        change was mounted with the recipe that produced it, and re-running
+        each recipe redraws it in place. What is NOT a recipe is re-applied
+        by hand here: a border title and a placeholder are plain attributes,
+        set once at mount, and nothing would otherwise go back for them.
+        """
+
+        for pane_id, name in (
+            ("#conversation", "Conversation"),
+            ("#activity", "Activity"),
+            ("#evidence-pane", "Evidence"),
+            ("#guardrails-pane", "Guardrails"),
+        ):
+            for pane in self.query(pane_id).results(VerticalScroll):
+                pane.border_title = _pane_title(name)
+        for prompt in self.query("#prompt").results(Input):
+            prompt.placeholder = _t(_PROMPT_PLACEHOLDER)
+        self._repaint_console()
 
     def _cmd_theme(self, argument: str = "") -> None:
         """Show or switch the console colour theme — a preference, like /language."""
@@ -6818,10 +6880,14 @@ class InvestigationApp(App):
     def _pane_hint(self, headline: str, hint: str) -> Text:
         """An empty pane's state: what it is, then how to reach it — no more."""
 
+        # Translated here rather than at the call site, because this is the
+        # recipe the widget keeps: a language switch re-runs it (see
+        # _repaint_console) and the pane changes language in place, exactly
+        # as a theme switch changes its colours.
         text = Text(justify="center")
-        text.append(headline, style=M.DIM_BRIGHT)
+        text.append(_t(headline), style=M.DIM_BRIGHT)
         text.append("\n\n")
-        text.append(hint, style=M.DIM)
+        text.append(_t(hint), style=M.DIM)
         return text
 
     @staticmethod
@@ -6847,7 +6913,7 @@ class InvestigationApp(App):
             # Only a pane with nothing in it is invited to fill itself; a pane
             # still holding accepted findings keeps the subtitle that says what
             # to do with them.
-            evidence.border_subtitle = "You accept findings with v"
+            evidence.border_subtitle = _t("You accept findings with v")
         for pane_id, hint_id, headline, detail in (
             (
                 "#activity",
@@ -7186,13 +7252,69 @@ class InvestigationApp(App):
         if self._jump_group("#activity", "sep-", number):
             self.query_one("#activity", VerticalScroll).focus()
 
-    def _populate_guardrails(self, result: InvestigationResult) -> None:
-        """One row per denial, grouped per message; clicking a row opens it.
+    def _record_guardrail_facts(self, result: InvestigationResult) -> None:
+        """Add this message's oversight record to what the case has said so far.
 
-        The collapsed row is just the denied call; expanding it shows the
-        full arguments, the capabilities it wanted and every recorded
-        reason. The authority line appears once per case. Messages with no
-        denial keep one green all-clear line counting the allowed steps.
+        Read off the cards rather than recomputed anywhere else, and read for
+        the three things that actually differ between runs: what was refused,
+        where the model guessed a location instead of following a finding, and
+        which capabilities the run genuinely exercised. The last of those
+        separates a disk case, where nearly every call only reads, from memory
+        and network work, where nearly every call spawns an external tool.
+        """
+
+        for card in result.oversight:
+            self._guardrail_checked_total += 1
+            self._guardrail_caps.update(card.requested_caps)
+            guessed_here = False
+            for reason in card.reasons:
+                text = str(reason)
+                if not text.startswith("ungrounded-path:"):
+                    continue
+                guessed_here = True
+                key, _, value = text[len("ungrounded-path:"):].partition("=")
+                pair = (key, value)
+                # Distinct locations, in the order they were first guessed. The
+                # same path asked for twice is one thing to look at, not two.
+                if pair not in self._guardrail_guessed:
+                    self._guardrail_guessed.append(pair)
+            if guessed_here:
+                self._guardrail_guessed_calls += 1
+
+    def _refresh_guardrail_summary(self) -> None:
+        """Redraw the standing summary, and say on the frame what is in it."""
+
+        pane = self.query_one("#guardrails-pane", VerticalScroll)
+        for hint in self.query("#guardrails-hint"):
+            hint.remove()
+        for allclear in self.query("#guardrails-allclear"):
+            allclear.remove()
+        mounted = list(self.query("#guardrails-summary").results(Static))
+        if mounted:
+            _paint(mounted[0], self._guardrail_summary)
+        else:
+            summary = _painted(self._guardrail_summary, id="guardrails-summary")
+            if pane.children:
+                pane.mount(summary, before=pane.children[0])
+            else:
+                pane.mount(summary)
+        # The counts go on the frame as well as in the body: the pane is a few
+        # rows tall and scrolls, and the one thing that must not scroll away is
+        # how much there is.
+        marks: list[str] = []
+        if self._guardrail_refusals:
+            marks.append(f"{len(self._guardrail_refusals)} refused")
+        if self._guardrail_guessed_calls:
+            marks.append(f"{self._guardrail_guessed_calls} guessed")
+        pane.border_subtitle = "  ".join(marks)
+
+    def _populate_guardrails(self, result: InvestigationResult) -> None:
+        """What this case's oversight record says, led by whatever varied.
+
+        The pane opens with a standing summary rewritten each message, and
+        keeps the denials themselves below it: one row per refusal, grouped per
+        message, expanding to the full arguments, the capabilities it wanted and
+        every recorded reason.
         """
 
         pane = self.query_one("#guardrails-pane", VerticalScroll)
@@ -7200,34 +7322,12 @@ class InvestigationApp(App):
             o for o in result.oversight if o.outcome == M.OUTCOME_REFUSED_BY_OVERSIGHT
         ]
         self._guardrail_allowed_total += max(0, len(result.oversight) - len(blocked))
+        self._guardrail_refusals.extend(blocked)
+        self._record_guardrail_facts(result)
+        if result.oversight:
+            self._refresh_guardrail_summary()
         if not blocked:
-            # A later clean message must NOT put "All N steps were allowed"
-            # back over a denial this case already recorded. The pane would
-            # then state, in the console's success colour, that nothing had
-            # been blocked in a case where something was — which is the one
-            # sentence a guardrails pane must never be able to produce.
-            if result.oversight and not self._guardrail_blocks:
-                # A clean run earns a positive statement, not a standing
-                # explainer: the pane says every checked step was allowed,
-                # and keeps counting until the first denial replaces it.
-                for hint in self.query("#guardrails-hint"):
-                    hint.remove()
-                mounted = list(self.query("#guardrails-allclear").results(Static))
-                if mounted:
-                    _paint(mounted[0], self._allclear_line)
-                else:
-                    pane.mount(
-                        _painted(
-                            self._allclear_line,
-                            id="guardrails-allclear",
-                            classes="pane-hint",
-                        )
-                    )
             return
-        for hint in self.query("#guardrails-hint"):
-            hint.remove()
-        for allclear in self.query("#guardrails-allclear"):
-            allclear.remove()
         if result.oversight and not self._guardrail_blocks:
             granted = result.oversight[0].granted_caps
             if granted:
@@ -7266,6 +7366,144 @@ class InvestigationApp(App):
                 else:
                     self.call_after_refresh(group_body.mount, row)
         pane.scroll_end(animate=False)
+
+    #: Refusal codes in the words an examiner would use. The vocabulary is the
+    #: oversight layer's own (``outcome_detail``); nothing is invented here and
+    #: an unknown code is shown as itself rather than guessed at, because a
+    #: panel that paraphrases a code it does not know is a panel that will one
+    #: day paraphrase it wrongly.
+    _REFUSAL_WORDS: ClassVar[dict[str, str]] = {
+        "invalid_operation_arguments": (
+            "arguments the operation does not accept"
+        ),
+        "ungrounded_path": "a path not grounded in an earlier finding",
+        "evidence_source_integrity_violation": (
+            "an evidence source that did not match its recorded digest"
+        ),
+        "repeated_deterministic_tool_error": (
+            "a call that had already failed the same way"
+        ),
+    }
+
+    #: How many guessed paths the pane names before it stops listing them. The
+    #: rest are counted, not hidden: on one measured run this advisory fired
+    #: 187 times in 312 calls, and a pane that tried to list all of them would
+    #: be a log rather than a panel.
+    _GUESSED_PATHS_SHOWN = 6
+
+    def _refusal_words(self, card: OversightCard) -> str:
+        """Why this call was refused, in words, from what was recorded."""
+
+        code = (card.outcome_detail or "").strip()
+        if code in self._REFUSAL_WORDS:
+            return self._REFUSAL_WORDS[code]
+        if code:
+            return code.replace("_", " ")
+        for reason in card.reasons:
+            text = str(reason)
+            head, _, tail = text.partition(":")
+            if head == "invalid-arguments" and tail in self._REFUSAL_WORDS:
+                return self._REFUSAL_WORDS[tail]
+        return "a reason the record does not name"
+
+    def _guardrail_lead(self) -> Text:
+        """The one line the pane leads with, chosen by what actually varied.
+
+        The pane used to lead with "All N steps were allowed" whatever had
+        happened, and that sentence is true in almost every run: across 506
+        recorded calls on one case, 13 were refused, none for a capability,
+        none for a path outside the case roots, and nothing was ever classified
+        above low risk. A line that is nearly always the same carries nothing.
+
+        So the lead is whichever of the three states the record is actually in,
+        strongest first, and it says what was refused rather than implying what
+        was repelled. What this layer stopped were malformed calls; a panel that
+        let that read as an intrusion would misdescribe the system it reports on.
+        """
+
+        line = Text()
+        if self._guardrail_refusals:
+            count = len(self._guardrail_refusals)
+            words = Counter(
+                self._refusal_words(card) for card in self._guardrail_refusals
+            )
+            reason, dominant = words.most_common(1)[0]
+            line.append(f"{M.GLYPH_ERROR} ", style=M.RED)
+            line.append(
+                f"{count} call{'' if count == 1 else 's'} refused", style=f"bold {M.RED}"
+            )
+            line.append(
+                f"  {reason}" if dominant == count else f"  mostly {reason}",
+                style=M.TEXT,
+            )
+            return line
+        if self._guardrail_guessed_calls:
+            calls = self._guardrail_guessed_calls
+            line.append(f"{M.GLYPH_WARN} ", style=M.ORANGE)
+            # The qualifier is deliberately NOT appended here. This pane is a
+            # third of a narrow column, and a lead that wraps mid-phrase reads
+            # as two half-sentences; what follows it says "allowed" plainly.
+            line.append(
+                f"{calls} of {self._guardrail_checked_total} calls guessed a location",
+                style=f"bold {M.ORANGE}",
+            )
+            return line
+        checked = self._guardrail_checked_total
+        noun = "step" if checked == 1 else "steps"
+        line.append(f"{M.GLYPH_OK} ", style=M.SUCCESS)
+        line.append(f"Nothing was stopped in {checked} checked {noun}", style=M.SUCCESS)
+        return line
+
+    def _guardrail_summary(self) -> RenderableType:
+        """The lead, then only what the lead did not already say.
+
+        Quiet by construction. A run with nothing notable in it gets one line
+        and gives the rest of the pane back, because the pane is read for what
+        varies and there is nothing here that does.
+        """
+
+        blocks: list[RenderableType] = [self._guardrail_lead()]
+        if self._guardrail_guessed and self._guardrail_refusals:
+            # The refusals took the lead, so the advisory says its own count
+            # here instead of going unmentioned.
+            calls = self._guardrail_guessed_calls
+            note = Text()
+            note.append(f"{M.GLYPH_WARN} ", style=M.ORANGE)
+            note.append(
+                f"{calls} call{'' if calls == 1 else 's'} also guessed a location",
+                style=M.ORANGE,
+            )
+            blocks.append(note)
+        if self._guardrail_guessed:
+            explanation = Text(
+                "A guessed location is one the model asked for without an "
+                "earlier finding placing it there. Nothing was blocked.",
+                style=M.DIM,
+            )
+            blocks.append(explanation)
+            shown = self._guardrail_guessed[: self._GUESSED_PATHS_SHOWN]
+            for key, value in shown:
+                row = Text(no_wrap=True, overflow="ellipsis")
+                row.append("   ", style=M.DIM)
+                row.append(f"{key}=", style=M.DIM)
+                row.append(value, style=M.DIM_BRIGHT)
+                blocks.append(row)
+            remaining = len(self._guardrail_guessed) - len(shown)
+            if remaining > 0:
+                blocks.append(
+                    Text(f"   {remaining} more", style=M.DIM)
+                )
+        if self._guardrail_caps:
+            used = Text(no_wrap=True, overflow="ellipsis")
+            used.append("exercised  ", style=M.DIM)
+            used.append(
+                "  ".join(
+                    cap.replace("_", " ") for cap in sorted(self._guardrail_caps)
+                ),
+                style=M.DIM_BRIGHT,
+            )
+            blocks.append(used)
+        return blocks[0] if len(blocks) == 1 else Group(*blocks)
 
     def _allclear_line(self) -> Text:
         steps = self._guardrail_allowed_total
