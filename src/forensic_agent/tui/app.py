@@ -2477,6 +2477,10 @@ class InvestigationApp(App):
         #: run keeps it until its thread unwinds, so the next question waits
         #: here rather than being refused at the prompt.
         self._ask_gate = threading.Lock()
+        #: What each key binding's description said in the language it was
+        #: declared in. Taken once, and translated from every time, so a switch
+        #: back and forth does not ask the catalog to translate its own output.
+        self._binding_descriptions: dict[tuple[str, int], str] | None = None
         #: How many external tools the last cancel had to stop. Read by the
         #: cancelled line, which says so rather than leaving the operator to
         #: wonder whether a scan is still running somewhere.
@@ -2965,8 +2969,13 @@ class InvestigationApp(App):
         grid.add_column(justify="right", no_wrap=True)
 
         def row(label: str, value: Text, command: str = "") -> None:
+            # The label goes through the language layer; the value does not,
+            # unless the caller translated it. A value here is usually an
+            # identifier -- a model id, a case label, a theme name, a trace id
+            # -- and an identifier that changes with the interface language is
+            # one the operator can no longer type back in.
             grid.add_row(
-                Text(label, style=M.DIM_BRIGHT), value, Text(command, style=M.DIM)
+                Text(_t(label), style=M.DIM_BRIGHT), value, Text(command, style=M.DIM)
             )
 
         row("model", Text((status.model or "—"), style=f"bold {M.ACCENT}"), "/model")
@@ -2977,11 +2986,17 @@ class InvestigationApp(App):
         # arranges itself on screen is a display preference and belongs with
         # the other preferences, not among the facts of the investigation.
         if self._controller.is_demo:
-            row("mode", Text("demo — a replayed case; nothing real is needed", style=M.PURPLE))
+            # Bound first so the row fits on one line. The secondary accent is
+            # exempt from the raised-surface contrast floor only for as long as
+            # both of its uses render on the terminal ground, and
+            # tests/test_tui_theme.py holds that exemption honest by counting
+            # those uses and reading this one off the row it sits on.
+            demo = _t("demo — a replayed case; nothing real is needed")
+            row("mode", Text(demo, style=M.PURPLE))
         has_evidence = bool(status.evidence_sources)
         row(
             "active case",
-            Text(status.case_label if has_evidence else "not loaded",
+            Text(status.case_label if has_evidence else _t("not loaded"),
                  style=(f"bold {M.ACCENT}" if has_evidence else M.DIM_BRIGHT)),
             "/case",
         )
@@ -2991,7 +3006,10 @@ class InvestigationApp(App):
         if has_evidence:
             row(
                 "sources",
-                Text(f"{M.GLYPH_OK} {len(status.evidence_sources)} attached", style=M.SUCCESS),
+                Text(
+                    f"{M.GLYPH_OK} {len(status.evidence_sources)} {_t('attached')}",
+                    style=M.SUCCESS,
+                ),
                 "/sources",
             )
         if not self._controller.is_demo:
@@ -3000,7 +3018,7 @@ class InvestigationApp(App):
                 row(
                     "tools",
                     Text(
-                        f"{count} available",
+                        f"{count} {_t('available')}",
                         style=(f"bold {M.ACCENT}" if count else M.DIM_BRIGHT),
                     ),
                     "/tools",
@@ -3012,9 +3030,9 @@ class InvestigationApp(App):
                 row(
                     "case context",
                     (
-                        Text(f"{M.GLYPH_OK} set", style=M.SUCCESS)
+                        Text(f"{M.GLYPH_OK} {_t('set')}", style=M.SUCCESS)
                         if brief
-                        else Text("not set", style=M.DIM_BRIGHT)
+                        else Text(_t("not set"), style=M.DIM_BRIGHT)
                     ),
                     "/context",
                 )
@@ -3059,7 +3077,7 @@ class InvestigationApp(App):
         width = min(72, max(48, pane or 72))
         return Panel(
             self._session_grid(),
-            title=Text(f"{M.GLYPH_POINT} Session", style=f"bold {M.ACCENT}"),
+            title=Text(f"{M.GLYPH_POINT} {_t('Session')}", style=f"bold {M.ACCENT}"),
             title_align="left",
             subtitle=self._panel_subtitle(width),
             subtitle_align="right",
@@ -3655,14 +3673,19 @@ class InvestigationApp(App):
         grid.add_column(justify="right", no_wrap=True)
 
         def row(label: str, value: Text, command: str = "") -> None:
+            # The label goes through the language layer; the value does not,
+            # unless the caller translated it. A value here is usually an
+            # identifier -- a model id, a case label, a theme name, a trace id
+            # -- and an identifier that changes with the interface language is
+            # one the operator can no longer type back in.
             grid.add_row(
-                Text(label, style=M.DIM_BRIGHT), value, Text(command, style=M.DIM)
+                Text(_t(label), style=M.DIM_BRIGHT), value, Text(command, style=M.DIM)
             )
 
         # No build row. Which binary is running is a question about the
         # installation, not about this session, and /doctor is where the
         # installation answers for itself.
-        row("version", Text(_version_label() or "unknown", style=M.DIM_BRIGHT))
+        row("version", Text(_version_label() or _t("unknown"), style=M.DIM_BRIGHT))
         row("theme", Text(M.active_palette_name(), style=M.TEXT), "/theme")
         try:
             from forensic_agent.cli import i18n
@@ -3687,20 +3710,26 @@ class InvestigationApp(App):
         # cards accepted into the EVIDENCE pane, and the ones still queued.
         accepted, waiting = len(self._evidence_cards), len(self._pending_review)
         findings = Text()
-        findings.append(f"{accepted} accepted", style=M.SUCCESS if accepted else M.DIM_BRIGHT)
+        findings.append(
+            f"{accepted} {_t('accepted')}",
+            style=M.SUCCESS if accepted else M.DIM_BRIGHT,
+        )
         findings.append(", ", style=M.DIM)
         findings.append(
-            f"{waiting} awaiting review", style=M.ORANGE if waiting else M.DIM_BRIGHT
+            f"{waiting} {_t('awaiting review')}",
+            style=M.ORANGE if waiting else M.DIM_BRIGHT,
         )
         row("findings", findings, "/findings")
         # The last run's own accounting, exactly as the ControlCard recorded it.
         last = self._last_result
         if last is not None:
             counts = Text()
-            counts.append(f"{last.controls.tool_calls} tool calls", style=M.TEXT)
+            counts.append(
+                f"{last.controls.tool_calls} {_t('tool calls')}", style=M.TEXT
+            )
             requests = last.controls.model_requests
             if requests is not None:
-                counts.append(f", {requests} model requests", style=M.TEXT)
+                counts.append(f", {requests} {_t('model requests')}", style=M.TEXT)
             counts.append(
                 f", {format_duration(last.controls.elapsed_s)}", style=M.DIM
             )
@@ -5055,7 +5084,69 @@ class InvestigationApp(App):
         for evidence in self.query("#evidence-pane").results(VerticalScroll):
             if not list(evidence.query(Collapsible)):
                 evidence.border_subtitle = _t("You accept findings with v")
+        self._retranslate_bindings()
         self._repaint_console()
+
+    def _retranslate_bindings(self) -> None:
+        """Rewrite the key descriptions the footer legend shows.
+
+        A binding is declared on the class and read at import, long before a
+        language is chosen, so the legend could not follow a switch by routing
+        a string the way everything else here does. What makes it possible is
+        that the map is per instance: a DOMNode copies the class's merged
+        bindings into ``self._bindings`` when it is built, so this app's copy
+        can be rewritten without touching the class or any other node.
+
+        It is the instance's OWN map that is rewritten, never a fresh copy of
+        the class's. That distinction is the whole of the bug this was written
+        against twice: ``App.__init__`` adds the command palette's ctrl+p to
+        the instance map and not to the class one, so rebuilding from the class
+        dropped it and the legend went from seven keys to none.
+
+        Each description is translated from the English it was DECLARED with,
+        kept in a snapshot taken the first time through, which is what makes
+        switching hr → en → hr work: translating in place would ask the catalog
+        on the second pass to translate a Croatian phrase it has never seen.
+
+        Six of the seven descriptions on the legend are this console's own
+        (evidence, activity, guardrails, help, quit, review); the seventh is
+        Textual's command palette, whose English is left alone by the catalog
+        simply having no entry for it. Textual's Input bindings never appear
+        here at all: they are declared ``show=False`` and the footer skips
+        them, so nothing reaches into another library's class.
+
+        Guarded, and deliberately: it touches a private attribute and a
+        dataclass field, and a Textual release that moves either must cost the
+        operator a translated legend and nothing else.
+        """
+
+        try:
+            from dataclasses import replace
+
+            bindings = self._bindings
+            if self._binding_descriptions is None:
+                self._binding_descriptions = {
+                    (key, index): binding.description
+                    for key, declared in bindings.key_to_bindings.items()
+                    for index, binding in enumerate(declared)
+                }
+            originals = self._binding_descriptions
+            for key, declared in list(bindings.key_to_bindings.items()):
+                # A NEW list per key: the instance map shares its lists with
+                # the class map, and translating one in place would translate
+                # every future console's bindings with it.
+                bindings.key_to_bindings[key] = [
+                    replace(
+                        binding,
+                        description=_t(originals.get((key, index), binding.description)),
+                    )
+                    if binding.description
+                    else binding
+                    for index, binding in enumerate(declared)
+                ]
+        except Exception:
+            return
+        self.refresh_bindings()
 
     def _cmd_theme(self, argument: str = "") -> None:
         """Show or switch the console colour theme — a preference, like /language."""

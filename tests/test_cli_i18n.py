@@ -479,7 +479,7 @@ def test_the_console_frame_changes_language_and_changes_back(tmp_path, monkeypat
         "forensic_agent.tui.controller.time.sleep", lambda *_: None, raising=False
     )
     # The preference is a real file; a test must not rewrite the operator's.
-    monkeypatch.setenv("DFA_RUN_DIR", str(tmp_path))
+    monkeypatch.setenv("DFA_RUNS_DIR", str(tmp_path))
 
     def titles(app) -> dict:
         return {
@@ -534,4 +534,139 @@ def test_the_console_frame_changes_language_and_changes_back(tmp_path, monkeypat
 
     # The autouse fixture above restores the process language; nothing to
     # undo here.
+    asyncio.run(scenario())
+
+
+def test_the_session_panel_and_the_key_legend_follow_the_language(tmp_path, monkeypatch):
+    """The two surfaces the first language pass left in English.
+
+    The Session panel is the block the operator reads before every question,
+    and the legend along the bottom names the keys. Both were English whatever
+    /language said, for two different reasons: the panel drew its labels as
+    literals, and a key binding is declared on the class and read at import,
+    long before a language is chosen.
+    """
+
+    import asyncio
+
+    pytest.importorskip("textual")
+
+    from textual.widgets._footer import FooterKey
+
+    from forensic_agent.tui import build_app
+    from forensic_agent.tui.controller import DemoController
+
+    monkeypatch.setattr(
+        "forensic_agent.tui.controller.time.sleep", lambda *_: None, raising=False
+    )
+    # The preference is a real file; a test must not rewrite the operator's.
+    monkeypatch.setenv("DFA_RUNS_DIR", str(tmp_path))
+
+    def legend(app) -> dict:
+        return {widget.key: widget.description for widget in app.query(FooterKey)}
+
+    def panel(app) -> str:
+        import io
+
+        from rich.console import Console as RichConsole
+
+        rendered = app._session_widget.render()
+        rendered = getattr(rendered, "_renderable", rendered)
+        # Pinned width, as every console test here pins it: the ambient
+        # terminal is not the same on this machine as it is in CI.
+        console = RichConsole(width=100, record=True, file=io.StringIO())
+        console.print(rendered)
+        return console.export_text()
+
+    async def scenario():
+        app = build_app(DemoController())
+        async with app.run_test(size=(140, 44)) as pilot:
+            await pilot.pause(0.3)
+            # The legend only carries the console's own keys once focus has
+            # left the prompt; at rest the prompt owns the keyboard.
+            app.set_focus(None)
+            await pilot.pause(0.2)
+
+            english_panel = panel(app)
+            english_legend = legend(app)
+            assert "provider" in english_panel
+            assert english_legend["e"] == "evidence"
+            assert english_legend["g"] == "guardrails"
+
+            app._set_language("hr")
+            await pilot.pause(0.4)
+
+            croatian_panel = panel(app)
+            assert "pružatelj" in croatian_panel, croatian_panel
+            assert "Sesija" in croatian_panel, croatian_panel
+            assert "provider" not in croatian_panel
+
+            croatian_legend = legend(app)
+            assert croatian_legend["e"] == "dokazi"
+            assert croatian_legend["g"] == "zaštite"
+            # Nothing was lost from the legend. Rebuilding it from the class's
+            # bindings instead of the instance's dropped the command palette,
+            # whose key App.__init__ adds to the instance map alone.
+            assert set(croatian_legend) == set(english_legend)
+            # Textual's own description is left alone: the catalog simply has
+            # no entry for it, which is the honest outcome rather than a
+            # reach into another library's class.
+            assert croatian_legend["ctrl+p"] == english_legend["ctrl+p"]
+
+            # And back, twice, because a description translated in place would
+            # survive the first return and then fail to translate again.
+            for _ in range(2):
+                app._set_language("en")
+                await pilot.pause(0.3)
+                assert legend(app) == english_legend
+                assert "provider" in panel(app)
+                app._set_language("hr")
+                await pilot.pause(0.3)
+                assert legend(app)["e"] == "dokazi"
+            app._set_language("en")
+            await pilot.pause(0.2)
+
+    asyncio.run(scenario())
+
+
+def test_translating_one_console_does_not_translate_the_next_one(tmp_path, monkeypatch):
+    """The instance's binding map shares its lists with the class's.
+
+    Rewriting a list in place would translate every console built afterwards
+    in the same process, including one whose operator never asked for it.
+    """
+
+    import asyncio
+
+    pytest.importorskip("textual")
+
+    from forensic_agent.tui import build_app
+    from forensic_agent.tui.controller import DemoController
+
+    monkeypatch.setattr(
+        "forensic_agent.tui.controller.time.sleep", lambda *_: None, raising=False
+    )
+    monkeypatch.setenv("DFA_RUNS_DIR", str(tmp_path))
+
+    def described(app, key: str) -> list[str]:
+        return [b.description for b in app._bindings.key_to_bindings[key]]
+
+    async def scenario():
+        first = build_app(DemoController())
+        async with first.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.2)
+            first._set_language("hr")
+            await pilot.pause(0.3)
+            assert described(first, "e") == ["dokazi"]
+
+        # The class the next console is built from is untouched.
+        class_map = type(first)._merged_bindings
+        assert class_map is not None
+        assert [b.description for b in class_map.key_to_bindings["e"]] == ["evidence"]
+
+        second = build_app(DemoController())
+        async with second.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.2)
+            assert described(second, "e") == ["evidence"]
+
     asyncio.run(scenario())
