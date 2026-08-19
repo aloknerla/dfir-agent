@@ -1,0 +1,11 @@
+# Native libraries the unit-test job needs before pip can build the forensic
+# bindings: pytsk3 compiles against The Sleuth Kit and libewf-python against
+# libewf, and both need a C toolchain.
+#
+# This file is the single source of truth for that list. The CI job installs
+# exactly what is listed here and hashes this file into its package cache key,
+# so editing the list invalidates the cache instead of silently reusing a stale
+# set of .deb files.
+build-essential
+libewf-dev
+libtsk-dev
