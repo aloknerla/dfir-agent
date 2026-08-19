@@ -5049,6 +5049,12 @@ class InvestigationApp(App):
                 pane.border_title = _pane_title(name)
         for prompt in self.query("#prompt").results(Input):
             prompt.placeholder = _t(_PROMPT_PLACEHOLDER)
+        # The evidence pane's own subtitle, under the same condition that put it
+        # there: a pane still holding findings keeps the subtitle that names
+        # them, and must not have the resting hint written back over it.
+        for evidence in self.query("#evidence-pane").results(VerticalScroll):
+            if not list(evidence.query(Collapsible)):
+                evidence.border_subtitle = _t("You accept findings with v")
         self._repaint_console()
 
     def _cmd_theme(self, argument: str = "") -> None:

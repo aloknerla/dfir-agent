@@ -512,6 +512,11 @@ def test_the_console_frame_changes_language_and_changes_back(tmp_path, monkeypat
             assert croatian["#guardrails-pane"] != english["#guardrails-pane"]
             assert app.query_one("#prompt", Input).placeholder != english_placeholder
 
+            # A border subtitle is a plain attribute, like the titles: nothing
+            # goes back for it unless the switch does.
+            subtitle = str(app.query_one("#evidence-pane").border_subtitle or "")
+            assert subtitle and "You accept findings" not in subtitle, subtitle
+
             # A pane's resting hint is a recipe, so it is redrawn in place
             # rather than left in the language it was mounted in.
             hint = app.query_one("#activity-hint")
